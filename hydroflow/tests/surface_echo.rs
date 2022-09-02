@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[test]
 pub fn test_echo() {
@@ -56,6 +56,54 @@ impl<T> Eq for UnboundedSenderEq<T> {}
 // impl<T> Eq for UnboundedReceiverEq<T> {}
 
 #[test]
+pub fn test_shuffle_client_server() {
+    let server = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut c_sendv = Vec::new();
+    let mut c_recvv = Vec::new();
+    for _ in 0..10 {
+        let (send, recv) = tokio::sync::mpsc::unbounded_channel::<String>();
+        c_sendv.push(UnboundedSenderEq(send));
+        c_recvv.push(recv);
+    }
+    let s_recv = server.1;
+    let mut s_df = hydroflow_syntax! {
+        // TODO: how to find the client that sent on this channel? Needs to be in the data?
+        members = recv_iter(c_sendv);
+        data = recv_stream(s_recv) -> map(|line| { println!("Broadcast {}", line); line });
+        my_join = join();
+        data -> map(|d| ((), d)) -> [0]my_join;
+        members -> map(|m| ((), m)) -> [1]my_join;
+        my_join -> for_each(|((), (d, UnboundedSenderEq(m)))| { m.send(d).unwrap(); });
+    };
+
+    // collection of Hydroflow clients; each sends a message to the server (need Rc handle)
+    let mut c_dfs = c_recvv
+    .into_iter()
+    .enumerate()
+    .map(|(i, recv)| {
+        let server_h = UnboundedSenderEq(server.0.clone());
+        server_h.0.send(i.to_string().to_owned()).unwrap();
+        let df = hydroflow_syntax! {
+            // TODO: how to get the server handle w/in here, send?
+            recv_stream(recv) -> for_each(|line| { println!("{} recv {}", i, line); });
+        };
+        println!(
+            "{}",
+            df.serde_graph()
+                .expect("No graph found, maybe failed to parse.")
+                .to_mermaid()
+        );
+        df
+    })
+    .collect::<Vec<_>>();
+    s_df.run_available();
+    for df in c_dfs.iter_mut() {
+        df.run_available();
+    }
+}
+
+#[test]
+#[ignore] // doesn't terminte
 pub fn test_shuffle_all_to_all() {
     // // initialize 10 nodes
     // let mut channel_vec: Vec<(UnboundedSenderEq<String>, UnboundedReceiverEq<String>)> = (1..10)
@@ -77,11 +125,11 @@ pub fn test_shuffle_all_to_all() {
         .map(|(i, recv)| {
             let sends = send_vec
                 .iter()
-                .enumerate()
-                .filter(|&(j, _)| i != j)
+                .enumerate()              // includes the position in the iterator as a tuple
+                .filter(|&(j, _)| i != j) // so it can filter itself out
                 .map(|(_, s)| s)
-                .cloned()
-                .collect::<Vec<_>>();
+                .cloned()                 // apparently this is OK, avoids Rc?
+                .collect::<Vec<_>>();     // all the members this will send to (i.e., excluding itself)
             let df = hydroflow_syntax! {
                 members = recv_iter(sends);
                 data = recv_stream(recv) -> map(|line| format!("Recv at {}: {}", i, line)) -> map(|line| { println!("{}", line); line });
