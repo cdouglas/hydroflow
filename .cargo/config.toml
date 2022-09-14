@@ -1,2 +1,2 @@
 [build]
-rustflags = ["-Zproc-macro-backtrace"]
+rustflags = ["-Zproc-macro-backtrace", "--cfg", "tokio_unstable"]
