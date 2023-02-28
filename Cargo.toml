@@ -12,6 +12,7 @@ members = [
     "relalg",
     "pusherator",
     "variadics",
+    "hdfs",
 ]
 
 [profile.release]
