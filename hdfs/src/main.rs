@@ -53,10 +53,10 @@ async fn main() {
     println!("Listening on {:?}", addr);
 
     match opts.role {
-        Role::Namenode => {
+        Role::NameNode => {
             namenode::run_server(outbound, inbound, opts).await;
         }
-        Role::Datanode => {
+        Role::DataNode => {
             datanode::run_server(outbound, inbound, opts).await;
         }
         Role::Client => {
