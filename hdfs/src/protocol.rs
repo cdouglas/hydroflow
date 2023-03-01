@@ -4,6 +4,10 @@ use uuid::Uuid;
 use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// crude client protocol
+// CREATE (key, replication) -> (lease)
+// ADDBLOCK (lease, offset) -> (lease, datanodes): report bytes written
+
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub enum NSRequest {
     Create {
@@ -12,6 +16,7 @@ pub enum NSRequest {
     },
     AddBlock {
         lease: Lease,
+        offset: u64,
     },
     Close {
         lease: Lease,
@@ -31,6 +36,7 @@ pub enum NSResponse {
     },
     AddBlockResponse {
         lease: Lease,
+        datanodes: Vec<SocketAddr>,
     },
     OpenResponse {
     },
@@ -39,11 +45,27 @@ pub enum NSResponse {
     },
 }
 
+pub enum DNRequest {
+    Heartbeat {
+        id: Uuid,
+        addr: SocketAddr,
+    },
+    Hello {
+    },
+}
+
+pub enum DNResponse {
+    HeartbeatAck {
+    },
+    HelloAck {
+    },
+}
+
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Lease {
-    id: Uuid, // TODO add more metadata, timeouts, etc.
-    block: Block,
-    len: u64,
+    pub id: Uuid, // TODO add more metadata, timeouts, etc.
+    pub block: Block,
+    //len: u64, // TODO restrict length of block?
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
@@ -62,7 +84,7 @@ pub enum Checksum {
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Block {
-    pool: String,
+    //pool: String,
     id: String,
     stamp: u64,
 }

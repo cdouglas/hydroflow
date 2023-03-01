@@ -53,6 +53,8 @@ async fn main() {
 
     match opts.role {
         Role::NameNode => {
+            // bind DN port TODO: from config
+            let (dn_outbound, dn_inbound, dn_addr) = bind_udp_bytes(addr).await;
             namenode::run_server(outbound, inbound, opts).await;
         }
         Role::DataNode => {

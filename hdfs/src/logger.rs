@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Write, BufWriter, Read};
 use std::{fs::OpenOptions, path::PathBuf};
@@ -9,21 +8,25 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::StreamDeserializer;
 
-use crate::protocol::Block;
+use crate::protocol::{Block, Lease};
 
 enum State {
-    RECOVERY { segments: Vec<LogSegment> },
+    RECOVERY {
+        segments: Vec<LogSegment>,
+    },
     ACTIVE,
     CLOSED,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum NSOperation {
-    CREATE { key: String, replication: u8 },
-    ADDBLOCK { key: String, blkid: Block, offset: u64 },
+    CREATE { key: String, replication: u8, lease: Lease },
+    ADDBLOCK { lease:Lease, blkid: Block, offset: u64 },
+    CLOSE_BLOCK { lease:Lease, blkid: Block, len: u64 },
 }
 
-pub struct Logger {
+pub struct Logger<'a> {
+    current_segment: Option<JsonLogReader<'a, File>>, // TODO move this to RECOVERY state (lifetime?)
     state: State,
     lsn: u64,
 }
@@ -34,7 +37,7 @@ pub struct LogSegment {
 }
 
 //impl <T: Serialize + Deserialize> Logger<T> {
-impl Logger {
+impl Logger<'_> {
     pub fn new(id: &str) -> Self {
         // TODO get id, recovery info (e.g., dir) from config
         if let Ok(mut logs) = Self::find_logs(Path::new("/tmp/nn")) {
@@ -43,6 +46,7 @@ impl Logger {
                     other => other,
             });
             Logger {
+                current_segment: Some(JsonLogReader::new(&logs[0].loc)),
                 state: State::RECOVERY {
                     segments: logs,
                 },
@@ -51,6 +55,7 @@ impl Logger {
         } else {
             std::fs::create_dir_all(Path::new("/tmp/nn")).unwrap();
             Logger {
+                current_segment: None,
                 state: State::RECOVERY { segments: vec![] },
                 lsn: 0,
             }
@@ -92,23 +97,46 @@ impl Logger {
     //}
 
     // TODO: define for any T implementing Serialize, Deserialize
-    fn next(&mut self) -> Option<NSOperation> {
-        //assert!(self.state == State::RECOVERY);
-        match &self.state {
+    pub fn next(&mut self) -> Option<NSOperation> {
+        match &mut self.state {
             State::RECOVERY { segments } => {
-                let mut ret = None;
                 loop {
-                    if segments.len() == 0 {
-                        // TODO rename last segment to recovery LSN
+                    if self.current_segment.is_none() {
                         self.state = State::ACTIVE;
-                        return ret;
+                        return None;
                     }
-                    // pull next (batch of) NSOperation
-                    self.lsn += 1;
-                    break;
+                    if let Some(Ok(ret)) = self.current_segment.as_mut().unwrap().read() {
+                        self.lsn += 1;
+                        return Some(ret);
+                    }
+
+                    // current segment empty
+                    if self.lsn != segments[0].lsn_range.end + 1 {
+                        // log not closed properly
+                        println!("Fixing log segment {:?} ({:?}-{:?})", segments[0].loc, segments[0].lsn_range.start, self.lsn);
+                        drop(self.current_segment.take());
+                        let new_name = segments[0].loc.parent()?.join(format!("{:016x}_{:016x}.log", segments[0].lsn_range.start, self.lsn));
+                        println!("Rename {:?} -> {:?}", &segments[0].loc, &new_name);
+                        std::fs::rename(&segments[0].loc, &new_name).expect(format!("Failed to rename {:?} to {:?}", segments[0].loc, &new_name).as_str());
+                        segments.remove(0); // TODO replace w/ VecDeque
+                    } else {
+                        println!("Closing log segment {:?} ({:?})", segments[0].loc, segments[0].lsn_range);
+                        drop(self.current_segment.take());
+                        segments.remove(0); // TODO replace w/ VecDeque
+                    }
+
+                    // ensure contiguous log segments (TODO: handle overlapping segments)
+                    if segments[0].lsn_range.start == self.lsn {
+                        self.current_segment = Some(JsonLogReader::new(&segments[0].loc));
+                    }
+
+                    if segments.len() == 0 {
+                        self.state = State::ACTIVE;
+                        return None
+                    }
                 }
             }
-            _ => panic!("Invalid state"),
+            _ => { return None; }
         }
         None
     }
@@ -143,8 +171,8 @@ struct JsonLogReader<'a, R: Read> {
 }
 
 impl JsonLogReader<'_, File> {
-    fn new() -> Self {
-        let logfile = OpenOptions::new().read(true).open("test.log").unwrap();
+    fn new(logfile: &Path) -> Self {
+        let logfile = OpenOptions::new().read(true).open(&logfile).unwrap();
         let deser = serde_json::Deserializer::from_reader(logfile);
         let tmp = deser.into_iter::<NSOperation>();
         JsonLogReader {

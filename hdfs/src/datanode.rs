@@ -3,11 +3,13 @@ use crate::protocol::Message;
 use chrono::prelude::*;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::util::{UdpSink, UdpStream};
+use hydroflow::util::{UdpSink, UdpStream, bind_udp_bytes, ipv4_resolve};
 use std::net::SocketAddr;
 
 pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crate::Opts) {
     println!("Server live!");
+
+    let (nn_outbound, nn_inbound, nn_addr) = bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
 
     let mut flow: Hydroflow = hydroflow_syntax! {
         // Define shared inbound and outbound channels

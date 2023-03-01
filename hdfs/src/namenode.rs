@@ -1,16 +1,56 @@
 use crate::helpers::print_graph;
-use crate::logger::Logger;
-use crate::protocol::{NSRequest, NSResponse};
+use crate::logger::{Logger, NSOperation};
+use crate::protocol::{NSRequest, NSResponse, Block, Lease};
 use chrono::prelude::*;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::util::{UdpSink, UdpStream};
+use hydroflow::util::{bind_udp_bytes, ipv4_resolve, UdpSink, UdpStream};
+use uuid::Uuid;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
+
+struct FileInfo {
+    blocks: Vec<Block>,
+    block_locations: HashMap<Block, Vec<SocketAddr>>,
+    replication: u8,
+    len: u64,
+}
 
 pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crate::Opts) {
     println!("Server live!");
 
-    let oplog = Logger::new("todo_id_from_cfg");
+    let mut oplog = Logger::new("todo_id_from_cfg");
+    let mut ns: BTreeMap<String, FileInfo> = BTreeMap::new();
+    let mut leases: HashMap<Uuid, String> = HashMap::new();
+    while let Some(op) = oplog.next() {
+        match op {
+            NSOperation::CREATE { key, replication, lease } => {
+                if let Some(_x) = ns.insert(key.to_string(), FileInfo { blocks: Vec::new(), block_locations: HashMap::new(), replication, len: 0u64 }) {
+                    panic!("Key already exists: {:?}", &key);
+                }
+                leases.insert(lease.id, key);
+            }
+            NSOperation::ADDBLOCK { lease, offset, .. } => {
+                let file = leases.get(&lease.id).unwrap();
+                let fileinfo = ns.get_mut(file).unwrap();
+            }
+            NSOperation::CLOSE_BLOCK { lease, blkid, len } => {
+                let file = leases.get(&lease.id).unwrap();
+                let fileinfo = ns.get_mut(file).unwrap();
+            }
+        }
+    }
+    println!("Loaded namespace from log: ({} keys)", ns.len());
+
+    let (dn_outbound, dn_inbound, dn_addr) = bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
+
+    // open leases need to be recovered from datanodes/clients reconnecting
+
+    let mut logflow: Hydroflow = hydroflow_syntax! {
+        // recv events from the main flow
+        // log them
+        // ACK the main flow when events are persisted
+    };
 
     let mut flow: Hydroflow = hydroflow_syntax! {
         // Define shared inbound and outbound channels
