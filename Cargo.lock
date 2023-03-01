@@ -1439,6 +1439,7 @@ dependencies = [
  "hydroflow 0.1.0 (git+https://github.com/hydro-project/hydroflow)",
  "regex",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "uuid",

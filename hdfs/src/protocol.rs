@@ -10,11 +10,17 @@ pub enum NSRequest {
         key: String,
         replication: u8,
     },
-    NextBlock {
+    AddBlock {
+        lease: Lease,
+    },
+    Close {
         lease: Lease,
     },
     Open {
         key: String,
+    },
+    RenewLease {
+        lease: Lease,
     },
 }
 
@@ -23,8 +29,8 @@ pub enum NSResponse {
     CreateResponse {
         lease: Lease,
     },
-    NextBlockResponse {
-        block: Block,
+    AddBlockResponse {
+        lease: Lease,
     },
     OpenResponse {
     },
@@ -45,17 +51,6 @@ pub enum Message {
     Echo {
         payload: String,
         ts: DateTime<Utc>,
-    },
-    ReplEcho {
-        payload: String,
-        stream_id: Block,
-        fwd: Vec<SocketAddr>,
-        offset: u64,
-        gen_stamp: u64,
-        ts: DateTime<Utc>,
-    },
-    AckEcho {
-        stream_id: String,
     },
     Heartbeat,
     HeartbeatAck,

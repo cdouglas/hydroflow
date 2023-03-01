@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 mod client;
 mod helpers;
 mod protocol;
-mod server;
 mod logger;
 mod namenode;
 mod datanode;

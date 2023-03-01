@@ -1,6 +1,6 @@
 use crate::helpers::print_graph;
 use crate::logger::Logger;
-use crate::protocol::Message;
+use crate::protocol::{NSRequest, NSResponse};
 use chrono::prelude::*;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
@@ -19,28 +19,28 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
 
         // Print all messages for debugging purposes
         inbound_chan[1]
-            -> for_each(|(m, a): (Message, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
+            -> for_each(|(m, a): (NSRequest, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
 
         // Demux and destructure the inbound messages into separate streams
         inbound_demuxed = inbound_chan[0]
-            ->  demux(|(msg, addr), var_args!(echo, heartbeat, errs)|
+            ->  demux(|(msg, addr), var_args!(nsops, leaseops, errs)|
                     match msg {
-                        Message::Echo {payload, ..} => echo.give((payload, addr)),
-                        Message::Heartbeat => heartbeat.give(addr),
+                        NSRequest::Create {key, replication, ..} => nsops.give((key, replication, addr)),
+                        NSRequest::AddBlock { lease, .. } => leaseops.give((lease, addr)),
                         _ => errs.give((msg, addr)),
                     }
                 );
 
-        // Echo back the Echo messages with updated timestamp
-        inbound_demuxed[echo]
-            -> map(|(payload, addr)| (Message::Echo { payload, ts: Utc::now() }, addr) ) -> [0]outbound_chan;
+        // namespace operation
+        inbound_demuxed[nsops]
+            -> map(|(key, replication, addr)| (NSResponse::Error { message: "yaks".to_string(), }, addr) ) -> [0]outbound_chan;
 
-        // Forward 
-        //inbound_demuxed[replecho]
-        //    -> map(|(payload, stream_id, fwd, addr)| (Message::ReplEcho { payload, stream_id, fwd, gen_stamp, ts: Utc::now() }, addr) ) -> [1]outbound_chan;
+        // lease operation
+        inbound_demuxed[leaseops]
+            -> map(|(lease, addr)| (NSResponse::Error { message: "yaks".to_string(), }, addr) ) -> [1]outbound_chan;
 
         // Respond to Heartbeat messages
-        inbound_demuxed[heartbeat] -> map(|addr| (Message::HeartbeatAck, addr)) -> [2]outbound_chan;
+        //inbound_demuxed[heartbeat] -> map(|addr| (Message::HeartbeatAck, addr)) -> [2]outbound_chan;
 
         // Print unexpected messages
         inbound_demuxed[errs]
