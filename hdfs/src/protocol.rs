@@ -5,28 +5,17 @@ use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // crude client protocol
-// CREATE (key, replication) -> (lease)
-// ADDBLOCK (lease, offset) -> (lease, datanodes): report bytes written
+// Create (key, replication) -> (lease): assign block, create lease; may be sparse?
+// AddBlock (lease, offset) -> (lease, datanodes): return new lease, report bytes written
+// Close (lease, blkid, len) -> (): close block, update fileinfo, return when all blocks are closed
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub enum NSRequest {
-    Create {
-        key: String,
-        replication: u8,
-    },
-    AddBlock {
-        lease: Lease,
-        offset: u64,
-    },
-    Close {
-        lease: Lease,
-    },
-    Open {
-        key: String,
-    },
-    RenewLease {
-        lease: Lease,
-    },
+    Create { key: String, replication: u8 },
+    AddBlock { lease: Lease, offset: u64 },
+    Close { lease: Lease },
+    Open { key: String },
+    RenewLease { lease: Lease },
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
@@ -38,27 +27,22 @@ pub enum NSResponse {
         lease: Lease,
         datanodes: Vec<SocketAddr>,
     },
-    OpenResponse {
-    },
-    Error { // must be a better way to do this...
+    OpenResponse {},
+    Error {
+        // must be a better way to do this...
         message: String,
     },
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum DNRequest {
-    Heartbeat {
-        id: Uuid,
-        addr: SocketAddr,
-    },
-    Hello {
-    },
+    Heartbeat { id: Uuid, clientaddr: SocketAddr },
+    BlockReport { blocks: Vec<Block> },
 }
 
 pub enum DNResponse {
-    HeartbeatAck {
-    },
-    HelloAck {
-    },
+    HeartbeatAck {},
+    HelloAck {},
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
@@ -70,10 +54,7 @@ pub struct Lease {
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
-    Echo {
-        payload: String,
-        ts: DateTime<Utc>,
-    },
+    Echo { payload: String, ts: DateTime<Utc> },
     Heartbeat,
     HeartbeatAck,
 }

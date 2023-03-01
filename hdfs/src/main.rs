@@ -5,11 +5,11 @@ use hydroflow::util::{bind_udp_bytes, ipv4_resolve};
 use std::net::SocketAddr;
 
 mod client;
+mod datanode;
 mod helpers;
-mod protocol;
 mod logger;
 mod namenode;
-mod datanode;
+mod protocol;
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {

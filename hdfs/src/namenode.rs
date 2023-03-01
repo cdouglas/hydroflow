@@ -1,17 +1,18 @@
 use crate::helpers::print_graph;
 use crate::logger::{Logger, NSOperation};
-use crate::protocol::{NSRequest, NSResponse, Block, Lease};
+use crate::protocol::{Block, DNRequest, Lease, NSRequest, NSResponse};
 use chrono::prelude::*;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::util::{bind_udp_bytes, ipv4_resolve, UdpSink, UdpStream};
-use uuid::Uuid;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
+use uuid::Uuid;
 
 struct FileInfo {
     blocks: Vec<Block>,
     block_locations: HashMap<Block, Vec<SocketAddr>>,
+    leases: HashSet<Uuid>,
     replication: u8,
     len: u64,
 }
@@ -24,25 +25,41 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
     let mut leases: HashMap<Uuid, String> = HashMap::new();
     while let Some(op) = oplog.next() {
         match op {
-            NSOperation::CREATE { key, replication, lease } => {
-                if let Some(_x) = ns.insert(key.to_string(), FileInfo { blocks: Vec::new(), block_locations: HashMap::new(), replication, len: 0u64 }) {
+            NSOperation::CREATE {
+                key,
+                replication,
+                lease,
+            } => {
+                leases.insert(lease.id, key.to_string());
+                let mut fileinfo = FileInfo {
+                    blocks: Vec::new(),
+                    block_locations: HashMap::new(),
+                    leases: HashSet::new(),
+                    replication,
+                    len: 0u64,
+                };
+                fileinfo.leases.insert(lease.id);
+                if let Some(_x) = ns.insert(key.to_string(), fileinfo) {
                     panic!("Key already exists: {:?}", &key);
                 }
-                leases.insert(lease.id, key);
             }
             NSOperation::ADDBLOCK { lease, offset, .. } => {
-                let file = leases.get(&lease.id).unwrap();
-                let fileinfo = ns.get_mut(file).unwrap();
+                let key = leases.get(&lease.id).unwrap();
+                let fileinfo = ns.get_mut(key).unwrap();
+                fileinfo.leases.insert(lease.id);
             }
-            NSOperation::CLOSE_BLOCK { lease, blkid, len } => {
+            NSOperation::SEAL_BLOCK { lease, blkid, len } => {
                 let file = leases.get(&lease.id).unwrap();
                 let fileinfo = ns.get_mut(file).unwrap();
+                fileinfo.leases.remove(&lease.id);
             }
         }
     }
     println!("Loaded namespace from log: ({} keys)", ns.len());
 
-    let (dn_outbound, dn_inbound, dn_addr) = bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
+    let mut blocks: HashMap<Block, Vec<SocketAddr>> = HashMap::new();
+    let (dn_outbound, dn_inbound, dn_addr) =
+        bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
 
     // open leases need to be recovered from datanodes/clients reconnecting
 
@@ -56,6 +73,19 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
         // Define shared inbound and outbound channels
         inbound_chan = source_stream_serde(inbound) -> tee();
         outbound_chan = merge() -> dest_sink_serde(outbound);
+
+        in_dn_demux = source_stream_serde(dn_inbound) -> demux(|(msg, addr), var_args!(liveness, leaseops, errs)|
+                match msg {
+                    DNRequest::Heartbeat { id, clientaddr } => liveness.give((id, clientaddr, addr)),
+                    DNRequest::BlockReport { blocks } => leaseops.give((blocks, addr)),
+                    _ => errs.give((msg, addr)),
+                }
+            );
+        // TODO
+        in_dn_demux[liveness] -> for_each(|(id, clientaddr, addr)| println!("Received heartbeat from {:?} @{:?} from {:?}", id, clientaddr, addr));
+        in_dn_demux[leaseops] -> for_each(|(blocks, addr)| println!("Received blocks {:?} from {:?}", blocks, addr));
+        in_dn_demux[errs] -> for_each(|(msg, addr)| println!("Received unexpected message type: {:?} from {:?}", msg, addr));
+
 
         // Print all messages for debugging purposes
         inbound_chan[1]

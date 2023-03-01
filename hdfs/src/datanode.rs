@@ -3,15 +3,23 @@ use crate::protocol::Message;
 use chrono::prelude::*;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::util::{UdpSink, UdpStream, bind_udp_bytes, ipv4_resolve};
+use hydroflow::util::{bind_udp_bytes, ipv4_resolve, UdpSink, UdpStream};
 use std::net::SocketAddr;
+use tokio::time;
+use tokio_stream::wrappers::IntervalStream;
 
 pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crate::Opts) {
     println!("Server live!");
 
-    let (nn_outbound, nn_inbound, nn_addr) = bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
+    let (nn_outbound, nn_inbound, nn_addr) =
+        bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
 
-    let mut flow: Hydroflow = hydroflow_syntax! {
+    let hb_stream = IntervalStream::new(time::interval(time::Duration::from_secs(10)));
+    let mut nnflow: Hydroflow = hydroflow_syntax! {
+        source_stream(hb_stream) -> map(|_| (Message::Heartbeat, nn_addr)) -> dest_sink_serde(nn_outbound);
+    };
+
+    let mut clientflow: Hydroflow = hydroflow_syntax! {
         // Define shared inbound and outbound channels
         inbound_chan = source_stream_serde(inbound) -> tee();
         outbound_chan = merge() -> dest_sink_serde(outbound);
@@ -24,8 +32,6 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
         inbound_demuxed = inbound_chan[0]
             ->  demux(|(msg, addr), var_args!(echo, heartbeat, errs)|
                     match msg {
-                        Message::Echo {payload, ..} => echo.give((payload, addr)),
-                        Message::Heartbeat => heartbeat.give(addr),
                         _ => errs.give((msg, addr)),
                     }
                 );
@@ -33,10 +39,6 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
         // Echo back the Echo messages with updated timestamp
         inbound_demuxed[echo]
             -> map(|(payload, addr)| (Message::Echo { payload, ts: Utc::now() }, addr) ) -> [0]outbound_chan;
-
-        // Forward 
-        //inbound_demuxed[replecho]
-        //    -> map(|(payload, stream_id, fwd, addr)| (Message::ReplEcho { payload, stream_id, fwd, gen_stamp, ts: Utc::now() }, addr) ) -> [1]outbound_chan;
 
         // Respond to Heartbeat messages
         inbound_demuxed[heartbeat] -> map(|addr| (Message::HeartbeatAck, addr)) -> [2]outbound_chan;
@@ -49,9 +51,11 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
     };
 
     if let Some(graph) = opts.graph {
-        print_graph(&flow, graph);
+        //print_graph(&nnflow, graph);
+        print_graph(&clientflow, graph);
     }
 
     // run the server
-    flow.run_async().await;
+    // TODO how to run the nnflow with the clientflow?
+    clientflow.run_async().await;
 }
