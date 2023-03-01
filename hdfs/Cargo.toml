@@ -9,6 +9,7 @@ edition = "2021"
 clap = { version = "4.0.29", features = [ "derive" ] }
 hydroflow = { git = "https://github.com/hydro-project/hydroflow" }
 serde = { version = "1", features = [ "derive" ] }
+# XXX security warning for this dependency; resolve before merge
 chrono = { version = "0.4.20", features = [ "serde" ], default-features = true }
 tokio = { version = "1.0", features = [ "rt-multi-thread" ] }
 tokio-stream = { version = "0.1.10" }
