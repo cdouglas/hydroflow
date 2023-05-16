@@ -25,6 +25,7 @@ members = [
     "topolotree",
     "variadics",
     "website_playground",
+    "hdfs",
 ]
 
 resolver = "2"
