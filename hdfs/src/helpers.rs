@@ -3,7 +3,7 @@ use hydroflow::scheduled::graph::Hydroflow;
 
 pub fn print_graph(flow: &Hydroflow, graph: GraphType) {
     let serde_graph = flow
-        .serde_graph()
+        .meta_graph()
         .expect("No graph found, maybe failed to parse.");
     match graph {
         GraphType::Mermaid => {
