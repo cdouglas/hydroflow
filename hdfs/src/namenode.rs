@@ -1,4 +1,4 @@
-use crate::helpers::print_graph;
+use crate::helpers::{print_graph, deserialize_json, serialize_json};
 use crate::logger::{Logger, NSOperation};
 use crate::protocol::{Block, DNRequest, Lease, NSRequest, NSResponse};
 use chrono::prelude::*;
@@ -20,6 +20,47 @@ struct FileInfo {
 pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crate::Opts) {
     println!("Server live!");
 
+    // OK finish writing a sample log
+    // read it back as json
+    // use one of the operators (lattice_batch?) to trigger processing client intput AFTER loading the log
+    // copy KVS code to implement the namespace lookup, return a dummy set of DN
+    
+    // THEN
+    // include DN registration and last-heartbeat tracking
+    // filter response based on last timestamp from DN, rather than removing DNs
+    // include background replication thread that periodically checks for missing DNs
+    write_tmp_log();
+
+    // TODO: should this be organized as multiple flows? As a single flow?
+    let mut ns_log = hydroflow_syntax! {
+        // hack to buffer requests until the server is ready
+        // TODO: can one distinguish between a full batch or a signal? Release requests after a timeout to a busy response?
+        //client_inbound = source_stream_serde(inbound) -> map(Result::unwrap) -> batch(100, cli_ready_rx) -> tee();
+        init = source_file("ops.log") // TODO collect source files by pattern (start_end.log, start_.log), join consecutively
+            -> map(|op| serde_json::from_str::<NSOperation>(&op).unwrap())
+            -> enumerate()            // TODO: take start from source LSN
+            -> tee();
+            
+        init[0] -> for_each(|(lsn, op)| println!("@{:?} op: {:?}", lsn, op));
+        logops = init[1] -> demux(|(lsn, op), var_args!(nsop, blkop, err)| match op {
+            NSOperation::CREATE {..} => nsop.give((lsn, op)),
+            NSOperation::ADDBLOCK {..} => blkop.give((lsn, op)),
+            NSOperation::SEALBLOCK {..} => blkop.give((lsn, op)),
+            NSOperation::COMMIT {..} => nsop.give((lsn, op)),
+            NSOperation::EOF {..} => panic!("EOF in log"),
+            _ => err.give((lsn, op)),
+        });
+
+        logops[nsop]  -> for_each(|(lsn, op)| println!("@{:?} nsop: {:?}", lsn, op));
+        logops[blkop] -> for_each(|(lsn, op)| println!("@{:?} blkop: {:?}", lsn, op));
+        logops[err]   -> for_each(|(lsn, op)| println!("@{:?} err: {:?}", lsn, op));
+    };
+    let chkpt_load = ns_log.run_async();
+
+    // idea: client should create and add blocks under a lease, DNs should seal as they're durable
+    // a client read should find the longest prefix of blocks that are sealed, and return the locations
+
+    // DELETE THIS
     let mut oplog = Logger::new("todo_id_from_cfg");
     let mut ns: BTreeMap<String, FileInfo> = BTreeMap::new();
     let mut leases: HashMap<Uuid, String> = HashMap::new();
@@ -43,12 +84,12 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
                     panic!("Key already exists: {:?}", &key);
                 }
             }
-            NSOperation::ADDBLOCK { lease, offset, .. } => {
+            NSOperation::ADDBLOCK { lease, id: offset, .. } => {
                 let key = leases.get(&lease.id).unwrap();
                 let fileinfo = ns.get_mut(key).unwrap();
                 fileinfo.leases.insert(lease.id);
             }
-            NSOperation::SEAL_BLOCK { lease, blkid, len } => {
+            NSOperation::SEALBLOCK { lease, blkid, len } => {
                 let file = leases.get(&lease.id).unwrap();
                 let fileinfo = ns.get_mut(file).unwrap();
                 fileinfo.leases.remove(&lease.id);
@@ -125,4 +166,74 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
 
     // run the server
     flow.run_async().await;
+}
+
+fn write_tmp_log() {
+    let dingos_yaks = Uuid::new_v4();
+    let mut dbg_init = hydroflow_syntax!{
+        source_iter(vec![
+            NSOperation::CREATE {
+                key: "/dingos/yaks".to_string(),
+                replication: 3u8,
+                lease: Lease {
+                    id: dingos_yaks,
+                },
+            },
+            //NSOperation::CREATE {
+            //    key: "/qvatbf/yaks".to_string(),
+            //    replication: 3u8,
+            //    lease: Lease {
+            //        id: Uuid::new_v4(),
+            //    },
+            //},
+            NSOperation::ADDBLOCK {
+                lease: Lease {
+                    id: dingos_yaks,
+                },
+                blkid: Block {
+                    id: 234678u64,
+                    stamp: 0u64,
+                },
+                id: 0,
+            },
+            NSOperation::CREATE {
+                key: "/qvatbf/lnxf".to_string(),
+                replication: 3u8,
+                lease: Lease {
+                    id: Uuid::new_v4(),
+                },
+            },
+            NSOperation::ADDBLOCK {
+                lease: Lease {
+                    id: dingos_yaks,
+                },
+                blkid: Block {
+                    id: 373894u64,
+                    stamp: 0u64,
+                },
+                id: 1,
+            },
+            NSOperation::CREATE {
+                key: "/dingos/lnxf".to_string(),
+                replication: 3u8,
+                lease: Lease {
+                    id: Uuid::new_v4(),
+                },
+            },
+            NSOperation::SEALBLOCK {
+                lease: Lease {
+                    id: dingos_yaks,
+                },
+                blkid: Block {
+                    id: 234678u64,
+                    stamp: 0u64,
+                },
+                len: 256 * 1024 * 1024,
+            },
+            ])
+          -> map(serialize_json)
+          -> dest_file("ops.log", false);
+    };
+    dbg_init.run_available();
+
 }

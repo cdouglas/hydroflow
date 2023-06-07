@@ -22,6 +22,7 @@ pub enum NSRequest {
 pub enum NSResponse {
     CreateResponse {
         lease: Lease,
+        block: Block,
     },
     AddBlockResponse {
         lease: Lease,
@@ -48,7 +49,7 @@ pub enum DNResponse {
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Lease {
     pub id: Uuid, // TODO add more metadata, timeouts, etc.
-    pub block: Block,
+    //pub block: Block,
     //len: u64, // TODO restrict length of block?
 }
 
@@ -66,8 +67,8 @@ pub enum Checksum {
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Block {
     //pool: String,
-    id: String,
-    stamp: u64,
+    pub id: u64,
+    pub stamp: u64,
 }
 
 //#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]

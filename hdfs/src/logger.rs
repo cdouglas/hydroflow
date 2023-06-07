@@ -16,22 +16,30 @@ enum State {
     CLOSED,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub enum NSOperation {
+    // open a stream for writing. Lease holders receive block ids and a 
     CREATE {
-        key: String,
+        key: String, // replace w/ ID, so changes to data track the entity, not the name
         replication: u8,
         lease: Lease,
     },
     ADDBLOCK {
         lease: Lease,
         blkid: Block,
-        offset: u64,
+        id: u64, // not offset... id in the lease namespace
     },
-    SEAL_BLOCK {
+    SEALBLOCK {
         lease: Lease,
         blkid: Block,
         len: u64,
+    },
+    COMMIT {
+        lease: Lease,
+        // list of 
+    },
+    // hack
+    EOF {
     },
 }
 

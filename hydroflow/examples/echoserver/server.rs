@@ -14,7 +14,9 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, _opts: cra
         // Define a shared inbound channel
         inbound_chan = source_stream_serde(inbound) -> map(Result::unwrap) -> tee();
 
-        ready = inbound_chan[1] -> filter(|(t,_) : &(EchoMsg, _)| t.payload.starts_with("ready")) -> map(|(e, _) : (EchoMsg, _)| e.payload) -> unique::<'static>();
+        ready = inbound_chan[1] -> filter(|(t,_) : &(EchoMsg, _)| t.payload.starts_with("ready"))
+                                -> map(|(e, _) : (EchoMsg, _)| e.payload)
+                                -> unique::<'static>();
 
         // Print all messages for debugging purposes
         inbound_chan[0] -> [0]now_ready;
