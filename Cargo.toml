@@ -26,6 +26,7 @@ members = [
     "variadics",
     "website_playground",
     "hdfs",
+    "basen",
 ]
 
 resolver = "2"
