@@ -2,7 +2,7 @@
 
 ## namespace
 
-(nothing until durable?)
+(no outgoing calls)
 
 ## datanodes
 
@@ -25,10 +25,6 @@ ADDBLOCK(lease) -> NN
 - matches to a key w/ outstanding lease
 returns token w/ ordered set of nodes (assume chain) + logical ID
 
-WRITE(token, data, offset) -> DN: 
-- send data to the first node in the list, replicates down the chain
-returns acknowledgements for each (token, offset) pair
-
 CLOSE(lease, list<blockid>) -> NN: + durability flag
 - relinquish the lease, optionally wait until data are durable on all nodes
 
@@ -40,6 +36,10 @@ INFO(key): -> NN
 
 READ(block, token) -> DN:
 - open each block, in order and stream data back. Assume namespace orders replicas by client distance
+
+WRITE(token, data, offset) -> DN: 
+- send data to the first node in the list, replicates down the chain
+returns acknowledgements for each (token, offset) pair
 
 
 # lease
@@ -60,6 +60,7 @@ READ(block, token) -> DN:
 
 ### namespace
 - initialize the namespace with an explicit operation, creates an empty namespace w/ unique ID
+  - can be in-memory at first
 - create nonce, but until there's namespace to recover, nothing else to do
 - on receipt of client traffic, reject if there are fewer than K nodes
 - [opt] function maps DN node information to a location; given two locations, can compute distance
@@ -91,7 +92,10 @@ read
 - OPEN(key) to NN, recv list of blocks w/ locations
 - READ(block, token) to first node in list, recv data OR on timeout, try next replica
 
-# V1 Failure
+# V1 Durability
 
+
+
+# V2 Fault Tolerance
 
 

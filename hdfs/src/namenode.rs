@@ -94,6 +94,8 @@ pub(crate) async fn run_server(outbound: UdpSink, inbound: UdpStream, opts: crat
                 let fileinfo = ns.get_mut(file).unwrap();
                 fileinfo.leases.remove(&lease.id);
             }
+            // TODO update
+            _ => panic!("Unexpected op: {:?}", op)
         }
     }
     println!("Loaded namespace from log: ({} keys)", ns.len());

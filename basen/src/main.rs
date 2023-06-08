@@ -2,18 +2,18 @@ use clap::{Parser, ValueEnum};
 use client::run_client;
 use hydroflow::tokio;
 use hydroflow::util::{bind_udp_bytes, ipv4_resolve};
-use server::run_server;
+use keynode::run_server;
 use std::net::SocketAddr;
 
 mod client;
 mod helpers;
 mod protocol;
-mod server;
+mod keynode;
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
-    Client,
-    Server,
+    Keynode,
+    Segnode,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -50,10 +50,10 @@ async fn main() {
     println!("Listening on {:?}", addr);
 
     match opts.role {
-        Role::Server => {
+        Role::Keynode => {
             run_server(outbound, inbound, opts).await;
         }
-        Role::Client => {
+        Role::Segnode => {
             run_client(outbound, inbound, opts).await;
         }
     }

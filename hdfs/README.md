@@ -47,9 +47,9 @@ READ(block, token) -> DN:
 - expiration? hash of key + secret w/ datanode?
 
 
-# Lucky on fault tolerance
-- fault domains as discrete groupings is inaccurate and doesn't capture heterogeneity
+# Discussion w/ Lucky on fault tolerance
 - correlation matrix (pairwise probability of correlated failure)
+- fault domains as discrete groupings is inaccurate and doesn't capture heterogeneity
 - spot instances could be used for storage, but replicating across spot instances in the same AZ is not a discrete risk
 - replicating across devices attached to the same node increases durability, particularly if if one device is a dying SSD
 - fault domains and replication should not be discrete choices, but exist in a continuous space
@@ -91,5 +91,7 @@ read
 - OPEN(key) to NN, recv list of blocks w/ locations
 - READ(block, token) to first node in list, recv data OR on timeout, try next replica
 
-# V1
+# V1 Failure
+
+
 

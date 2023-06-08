@@ -11,5 +11,8 @@
     ],
     "files.watcherExclude": {
         "**/target": true
-    }
+    },
+    "rust-analyzer.linkedProjects": [
+        "./hdfs/Cargo.toml"
+    ]
 }
