@@ -1,7 +1,0 @@
-[namenode]
-pool_id = "ns_00000_297830"
-port = 4344
-logdir = "/tmp/nn"
-
-[datanode]
-logdir = "/tmp/dn"
