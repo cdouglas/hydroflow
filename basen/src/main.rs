@@ -2,18 +2,21 @@ use clap::{Parser, ValueEnum};
 use client::run_client;
 use hydroflow::tokio;
 use hydroflow::util::{bind_udp_bytes, ipv4_resolve};
-use keynode::run_server;
+use keynode::run_keynode;
+use segnode::run_segnode;
 use std::net::SocketAddr;
 
 mod client;
 mod helpers;
 mod protocol;
 mod keynode;
+mod segnode;
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
     Keynode,
     Segnode,
+    Client,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -51,9 +54,12 @@ async fn main() {
 
     match opts.role {
         Role::Keynode => {
-            run_server(outbound, inbound, opts).await;
+            run_keynode(outbound, inbound, opts).await;
         }
         Role::Segnode => {
+            run_segnode(outbound, inbound, opts).await;
+        }
+        Role::Client => {
             run_client(outbound, inbound, opts).await;
         }
     }

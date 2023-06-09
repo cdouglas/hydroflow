@@ -28,6 +28,10 @@ members = [
     "basen",
 ]
 
+excludes = [
+  "hdfs",
+]
+
 resolver = "2"
 
 [profile.release]
