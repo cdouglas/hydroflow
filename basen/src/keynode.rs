@@ -2,21 +2,21 @@ use chrono::prelude::*;
 use crate::helpers::print_graph;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::util::{bind_udp_bytes, ipv4_resolve, UdpSink, UdpStream};
+use hydroflow::util::{bind_tcp_bytes, ipv4_resolve, UdpSink, UdpStream};
 use std::net::SocketAddr;
 use crate::protocol::*;
 
-pub(crate) async fn run_keynode(outbound: UdpSink, inbound: UdpStream, opts: crate::Opts) {
+pub(crate) async fn run_keynode(_cl_outbound: UdpSink, cl_inbound: UdpStream, opts: crate::Opts) {
 
     // open separate channel for SN traffic
-    let (sn_outbound, sn_inbound, sn_addr) =
-        bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
+    let (_sn_outbound, sn_inbound, _sn_addr) =
+        bind_tcp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
 
     let mut flow: Hydroflow = hydroflow_syntax! {
         //
         // client
         //
-        client_in = source_stream_serde(inbound) -> map(|udp_msg| udp_msg.unwrap()) -> tee();
+        client_in = source_stream_serde(cl_inbound) -> map(|udp_msg| udp_msg.unwrap()) -> tee();
         //client_out = union() -> dest_sink_serde(outbound);
 
         client_in[1]
@@ -43,16 +43,16 @@ pub(crate) async fn run_keynode(outbound: UdpSink, inbound: UdpStream, opts: cra
         //
         // segment
         //
-        //segnode_in = source_stream_serde(sn_inbound) -> map(|udp_msg| udp_msg.unwrap()) -> tee();
-        segnode_in = source_iter([SKRequest::Heartbeat {id: SegmentNodeID { id: 1234u64 }, blocks: vec![]}]); // -> tee();
+        segnode_in = source_stream_serde(sn_inbound) -> map(|m| m.unwrap()) -> tee();
+        //segnode_in = source_iter([SKRequest::Heartbeat {id: SegmentNodeID { id: 1234u64 }, blocks: vec![]}]); // -> tee();
         //segnode_out = union() -> dest_sink_serde(sn_outbound);
         //segnode_out = dest_sink_serde(sn_outbound);
-        //segnode_in[1]
-        //    -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
+        segnode_in[1]
+            -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
 
-        segnode_demux = segnode_in
+        segnode_demux = segnode_in[0]
             //->  demux(|(msg, addr), var_args!(heartbeat, errs)|
-            ->  demux(|msg, var_args!(heartbeat, errs)|
+            ->  demux(|(msg, _a), var_args!(heartbeat, errs)|
                     match msg {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
                         SKRequest::Heartbeat {id, ..} => heartbeat.give((id.id, hydroflow::lattices::Max::new(Utc::now()))),
@@ -69,7 +69,7 @@ pub(crate) async fn run_keynode(outbound: UdpSink, inbound: UdpStream, opts: cra
         source_iter([(1234u64, hydroflow::lattices::Max::new(true))]) -> [1]sn_last_contact;
 
         sn_last_contact
-            -> for_each(|(id, (last_contact, is_alive))| println!("{}: Got {:?} from {:?}", Utc::now(), id, last_contact));
+            -> for_each(|(id, (last_contact, _))| println!("{}: Got {:?} from {:?}", Utc::now(), id, last_contact));
         //segnode_demux[register] // todo
         //    -> for_each(|(msg, addr)| println!("Received register message type: {:?} from {:?}", msg, addr));
 

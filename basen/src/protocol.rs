@@ -1,4 +1,3 @@
-use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -21,6 +20,12 @@ pub struct BlockState {
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+pub struct Heartbeat {
+    pub id: Uuid,
+    pub addr: SocketAddr,
+}
+
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Block {
     pub pool: String, // cluster ID
     pub id: u64,      // block ID
@@ -40,7 +45,7 @@ pub struct ClientID {
     // add metadata for KN to determine location for replica ordering
 }
 
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct SegmentNodeID {
     //id: Uuid,
     pub id: u64,
@@ -80,7 +85,7 @@ pub enum CSResponse {
 }
 
 // segment node -> key node
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 pub enum SKRequest {
     Register  { id: SegmentNodeID },
     Heartbeat { id: SegmentNodeID, blocks: Vec<Block> },
