@@ -1,6 +1,7 @@
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use clap::{Parser, ValueEnum};
 use client::run_client;
+use hydroflow::lattices::Max;
 use hydroflow::{tokio, hydroflow_syntax};
 use hydroflow::util::{bind_udp_bytes, ipv4_resolve, connect_tcp_bytes, bind_tcp_bytes};
 use keynode::run_keynode;
@@ -56,46 +57,48 @@ async fn key_node(keynode_server_addr: &'static str) {
     let (sn_outbound, sn_inbound, _sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_server_addr).unwrap()).await;
 
     let mut df = hydroflow_syntax! {
-        segnode_in = source_stream_serde(sn_inbound) -> map(|m| m.unwrap()) -> tee();
-        //segnode_out = union() -> dest_sink_serde(sn_outbound);
-        segnode_out = dest_sink_serde(sn_outbound);
-        segnode_in[1]
-            -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: SN {:?} from {:?}", Utc::now(), m, a));
-
-        segnode_demux = segnode_in[0]
+        segnode_demux = source_stream_serde(sn_inbound)
+            -> map(|m| m.unwrap())
+            -> inspect(|(m, a)| { println!("{}: SN {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
-                        SKRequest::Heartbeat { id, blocks, } => heartbeat.give((id, blocks, addr, hydroflow::lattices::Max::new(Utc::now()))),
+                        SKRequest::Heartbeat { id, blocks, } => heartbeat.give((id, blocks, addr, Max::new(Utc::now()))),
                         //_ => errs.give((sn_req, addr)),
                         _ => errs.give((sn_req, addr)),
                     }
                 );
-        heartbeats = segnode_demux[heartbeat] -> tee();
-        sn_last_contact = heartbeats[0]
-          -> map(|(id, _, addr, last_contact)| (id, (addr, last_contact)))
-          -> tee();
 
-        sn_last_contact[0]
-          -> for_each(|(id, (addr, last_contact))| println!("{}: LC {:?} at {:?} from {:?}", Utc::now(), id, last_contact, addr));
+        heartbeats = segnode_demux[heartbeat]
+            -> tee();
 
-        sn_last_contact[1]
-            -> map(|(_, (addr, _))| (SKResponse::Heartbeat { }, addr))
-            -> segnode_out;
+        // Heartbeat response
+        heartbeats
+            -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
+            -> dest_sink_serde(sn_outbound);
 
-        // block -> Vec<SegmentNodeID>
-        block_map = heartbeats[1]
-          -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, _)| blocks.into_iter().map(move |block| (block, id.clone())))
-          -> fold_keyed(HashSet::new, |acc: &mut HashSet<SegmentNodeID>, id| {
+        // LastContactMap: HashMap<Host, Time>
+        last_contact_map = join::<'tick, 'static>();
+        null() -> [0]last_contact_map;
+        last_contact_map -> map(|x: (SegmentNodeID, ((), (SocketAddr, Max<DateTime<Utc>>)))| x) -> null();
+        heartbeats
+            -> map(|(id, _, addr, last_contact)| (id, (addr, last_contact)))
+            -> inspect(|(id, (addr, last_contact))| println!("{}: LC {:?} at {:?} from {:?}", Utc::now(), id, last_contact, addr))
+            -> [1]last_contact_map;
+
+        // BlockMap: HashMap<BlockId, Set<Hosts>>
+        block_map = join::<'tick, 'static>();
+        null() -> [0]block_map;
+        block_map -> map(|x: (Block, ((), HashSet<SegmentNodeID>))| x) -> null();
+        heartbeats
+            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, id.clone())))
+            -> fold_keyed::<Block>(HashSet::<SegmentNodeID>::new, |acc: &mut HashSet<SegmentNodeID>, id: SegmentNodeID| {
                 acc.insert(id);
-                acc.to_owned()
             })
-          -> tee();
+            -> [1]block_map;
 
         segnode_demux[errs]
           -> for_each(|(msg, addr)| println!("Unexpected SN message type: {:?} from {:?}", msg, addr));
-
-        block_map[1] -> null();
     };
 
     df.run_async().await.unwrap();
