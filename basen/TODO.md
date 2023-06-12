@@ -20,6 +20,7 @@
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             -> tee();
+3. Currently going crazy instead of triggering a response
 
 
 # Random BASE'n

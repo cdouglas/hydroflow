@@ -13,7 +13,7 @@ pub(crate) async fn run_segnode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
 
     //let (kn_outbound, _kn_inbound, kn_addr) =
     //    bind_udp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
-    let (kn_outbound, _kn_inbound) = connect_tcp_bytes();
+    let (kn_outbound, kn_inbound) = connect_tcp_bytes();
     //let (input_send, input_recv) = hydroflow::util::unbounded_channel::<u32>();
 
     let sn_id = Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap();
@@ -48,6 +48,18 @@ pub(crate) async fn run_segnode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
         hb_report[0]
             -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: HB {:?} to {:?}", Utc::now(), m, a));
         hb_report[1] -> sk_chan;
+
+        kn_demux = source_stream_serde(kn_inbound)
+                -> map(Result::unwrap)
+                -> demux(|(kn_resp, addr), var_args!(heartbeat, errs)|
+                    match kn_resp {
+                        SKResponse::Heartbeat { } => heartbeat.give(addr),
+                        _ => errs.give((kn_resp, addr)),
+                    }
+                );
+        kn_demux[heartbeat]
+          -> for_each(|a: SocketAddr| println!("{}: HB response from {:?}", Utc::now(), a));
+        kn_demux[errs] -> null();
 
         // Define shared inbound and outbound channels
         inbound_chan = source_stream_serde(cl_inbound) -> map(|udp_msg| udp_msg.unwrap()) /* -> tee() */; // commented out since we only use this once in the client template
