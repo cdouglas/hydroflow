@@ -1,4 +1,5 @@
 use chrono::prelude::*;
+use uuid::Uuid;
 use crate::helpers::print_graph;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
@@ -15,7 +16,8 @@ pub(crate) async fn run_segnode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
     let (kn_outbound, _kn_inbound) = connect_tcp_bytes();
     //let (input_send, input_recv) = hydroflow::util::unbounded_channel::<u32>();
 
-    let sn_id = SegmentNodeID { id: 1234u64 };
+    let sn_id = Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap();
+    let sn_id = SegmentNodeID { id: sn_id, }; //Uuid::new_v4(), };
     let kn_addr = ipv4_resolve("localhost:4345").unwrap();
 
     let hb_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));

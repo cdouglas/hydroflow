@@ -1,8 +1,10 @@
 use chrono::prelude::*;
+use uuid::Uuid;
 use crate::helpers::print_graph;
 use hydroflow::hydroflow_syntax;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::util::{bind_tcp_bytes, ipv4_resolve, UdpSink, UdpStream};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use crate::protocol::*;
 
@@ -11,6 +13,7 @@ pub(crate) async fn run_keynode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
     // open separate channel for SN traffic
     let (_sn_outbound, sn_inbound, _sn_addr) =
         bind_tcp_bytes(ipv4_resolve("localhost:4345").unwrap()).await;
+    let sn_id = SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() };
 
     let mut flow: Hydroflow = hydroflow_syntax! {
         //
@@ -48,30 +51,55 @@ pub(crate) async fn run_keynode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
         //segnode_out = union() -> dest_sink_serde(sn_outbound);
         //segnode_out = dest_sink_serde(sn_outbound);
         segnode_in[1]
-            -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
+            -> for_each(|(m, a): (SKRequest, SocketAddr)| println!("{}: SN {:?} from {:?}", Utc::now(), m, a));
 
         segnode_demux = segnode_in[0]
             //->  demux(|(msg, addr), var_args!(heartbeat, errs)|
-            ->  demux(|(msg, _a), var_args!(heartbeat, errs)|
-                    match msg {
+            ->  demux(|(sn_req, addr), var_args!(heartbeat, errs)|
+                    match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
-                        SKRequest::Heartbeat {id, ..} => heartbeat.give((id.id, hydroflow::lattices::Max::new(Utc::now()))),
-                        //_ => errs.give((msg, addr)),
-                        _ => errs.give(msg),
+                        SKRequest::Heartbeat { id, blocks, } => heartbeat.give(((id, blocks), hydroflow::lattices::Max::new(Utc::now()))),
+                        //_ => errs.give((sn_req, addr)),
+                        _ => errs.give((sn_req, addr)),
                     }
                 );
-        heartbeats = segnode_demux[heartbeat];
+        heartbeats = segnode_demux[heartbeat] -> tee();
+        heartbeats[0] -> [0]sn_last_contact;
 
-        segnode_demux[errs] -> null();
+        // block -> Vec<SegmentNodeID>
+        block_map = heartbeats[1]
+          -> flat_map(|((id, blocks), _): ((SegmentNodeID, Vec<Block>), _)| blocks.into_iter().map(move |block| (block, id.clone())))
+          -> fold_keyed(HashSet::new, |acc: &mut HashSet<SegmentNodeID>, id| {
+                acc.insert(id);
+                acc.to_owned()
+            })
+          -> tee();
 
-        sn_last_contact = lattice_join::<'static, 'tick, hydroflow::lattices::Max<chrono::DateTime<Utc>>, hydroflow::lattices::Max<bool>>();
-        heartbeats -> [0]sn_last_contact;
-        source_iter([(1234u64, hydroflow::lattices::Max::new(true))]) -> [1]sn_last_contact;
+        block_map[0]
+            -> for_each(|(block, id): (Block, HashSet<SegmentNodeID>)| println!("{}: Blockmap: {:?} -> {:?}", Utc::now(), block, id));
 
-        sn_last_contact
-            -> for_each(|(id, (last_contact, _))| println!("{}: Got {:?} from {:?}", Utc::now(), id, last_contact));
+        //block_map = join() -> tee();
+        //heartbeats[1]
+        //  -> flat_map(|((id, blocks), last_contact)| blocks.into_iter().map(move |block| (block, id)))
+        //  -> [0]block_map;
+        //block_map[0] -> 
+
         //segnode_demux[register] // todo
         //    -> for_each(|(msg, addr)| println!("Received register message type: {:?} from {:?}", msg, addr));
+
+        // DBG as if SKRequest::Register already occurred
+        source_iter([((sn_id, vec![
+            Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
+            Block { pool: "2023874_0".to_owned(), id: 2348985u64 },
+        ]), hydroflow::lattices::Max::new(true))]) -> [1]sn_last_contact;
+
+        sn_last_contact = lattice_join::<'static, 'tick, hydroflow::lattices::Max<chrono::DateTime<Utc>>, hydroflow::lattices::Max<bool>>();
+
+        sn_last_contact
+            -> for_each(|((id, blocks), last_contact)| println!("{}: Got {:?} {:?} from {:?}", Utc::now(), id, blocks, last_contact));
+
+        segnode_demux[errs]
+            -> for_each(|(msg, addr)| println!("Unexpected SN message type: {:?} from {:?}", msg, addr));
 
         //// heartbeat handling
         //hb_response = lattice_join<'static, 'tick, hydroflow::lattices::Max<(_, u64)>, hydroflow::lattices::Max<(_, u64)>>() -> 

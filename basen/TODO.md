@@ -9,14 +9,14 @@
             -> [0]hb_report;
         canned_blocks
             -> map(|b| (kn_addr, b))
-            // -> multiset_delta() // `!#!` doesn't fix it
+            // -> multiset_delta()          // `!#!` no effect
             -> [1]hb_report;
-        hb_report = join::<'tick,'static>()
-            // -> multiset_delta() // `!#!` no duplicates, but still reports all blocks, not new blocks
+        hb_report = join::<'tick,'static>() // `!#!` changing this to <'static,'static> has no effect? <'static,'tick> and <'tick,'tick> emits nothing?
+            // -> multiset_delta()          // `!#!` no duplicates, but still reports all blocks, not new blocks
             -> fold_keyed(Vec::new,
                 |acc: &mut Vec<Block>, (_, blk): ((), Block)| {
                     acc.push(blk);
-                    acc.to_owned() // `!#!` why is this necessary?
+                    acc.to_owned()          // `!#!` why is .to_owned() necessary?
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             -> tee();

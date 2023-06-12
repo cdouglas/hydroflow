@@ -21,7 +21,7 @@ pub struct BlockState {
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct Heartbeat {
-    pub id: Uuid,
+    pub id: SegmentNodeID,
     pub addr: SocketAddr,
 }
 
@@ -39,16 +39,16 @@ pub struct LocatedBlock {
     // pub token: bytes, // authentication token
 }
 
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct ClientID {
     pub id: Uuid,
     // add metadata for KN to determine location for replica ordering
 }
 
-#[derive(Eq, PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
 pub struct SegmentNodeID {
-    //id: Uuid,
-    pub id: u64,
+    pub id: Uuid,
+    //pub id: u64,
     // add metadata for KN to determine location
 }
 
@@ -87,7 +87,7 @@ pub enum CSResponse {
 // segment node -> key node
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 pub enum SKRequest {
-    Register  { id: SegmentNodeID },
+    Register  { id: SegmentNodeID, cli_addr: SocketAddr },
     Heartbeat { id: SegmentNodeID, blocks: Vec<Block> },
 }
 
