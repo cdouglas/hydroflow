@@ -22,6 +22,14 @@
             -> tee();
 3. Currently going crazy instead of triggering a response
 
+#
+
+Versioned lattice type: how to delete things
+- override w/ up-to-date version
+- not a tombstone; uses a VC/node... 
+
+bugfix: some persisted things can spin, rebase to ensure it's not that
+
 
 # Random BASE'n
 

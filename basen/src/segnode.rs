@@ -40,7 +40,7 @@ pub(crate) async fn run_segnode(_cl_outbound: UdpSink, cl_inbound: UdpStream, op
             -> fold_keyed(Vec::new,
                 |acc: &mut Vec<Block>, (_, blk): ((), Block)| {
                     acc.push(blk);
-                    acc.to_owned()
+                    //acc.to_owned() // !#! not necessary for _keyed operators; not moved into the fold closure
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             -> tee();
