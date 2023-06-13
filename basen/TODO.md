@@ -26,6 +26,12 @@ keyed + non-keyed version
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             -> tee();
+
+when `fold_keyed` is static, then it reschedules itself; still has data, but if nobody is interested then you don't need to run again (already been seen)
+- if someone asks for it, it's retained, it'll show up
+- means: are external events feeding into the subgraph
+- bug? re-triggers if something happens everywhere
+
 3. Currently going crazy instead of triggering a response
 4. Why is `Cargo.lock` checked in?
 
