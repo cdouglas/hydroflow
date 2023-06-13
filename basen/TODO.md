@@ -3,6 +3,12 @@
 # Questions for Lucky
 
 1. hb_report: in fold_keyed, wtf is going on references? Why did this differ from the example: https://hydro.run/docs/hydroflow/syntax/surface_ops_gen#fold_keyed ?
+
+keyed + non-keyed version
+- keyed/non-keyed version; type of reduce is different (shouldn't be, but is)
+- non-keyed: moved, but doesn't work w/ hash tables & other machinery underneath
+- now, get passed mutable value, fold/reduce new data, and that's it (nothing to return)
+
 2.  The following duplicates and repeats the `canned_blocks` map for each HB. Why?
         hb_timer = source_stream(hb_stream)
             -> map(|_| (kn_addr, ()))
@@ -21,8 +27,9 @@
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             -> tee();
 3. Currently going crazy instead of triggering a response
+4. Why is `Cargo.lock` checked in?
 
-#
+# Lucky 2023-06-12
 
 Versioned lattice type: how to delete things
 - override w/ up-to-date version
