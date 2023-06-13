@@ -1,5 +1,5 @@
 [package]
-name = "hydroflow-template"
+name = "basen"
 version = "0.1.0"
 edition = "2021"
 

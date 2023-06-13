@@ -1,19 +1,21 @@
-use chrono::{Utc, DateTime};
+use std::net::SocketAddr;
+
+use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::Max;
-use hydroflow::{tokio, hydroflow_syntax};
-use hydroflow::util::{ipv4_resolve, connect_tcp_bytes, bind_tcp_bytes};
+use hydroflow::lattices::set_union::SetUnionHashSet;
+use hydroflow::lattices::{DomPair, Max};
+use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
+use hydroflow::{hydroflow_syntax, tokio};
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
-use std::collections::HashSet;
-use std::net::SocketAddr;
+
 use crate::protocol::*;
 
 mod client;
 mod helpers;
-mod protocol;
 mod keynode;
+mod protocol;
 mod segnode;
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -47,16 +49,36 @@ struct Opts {
 async fn main() {
     const KEYNODE_SERVER_ADDR: &str = "127.0.0.55:4345";
 
-    futures::join!(segment_node(KEYNODE_SERVER_ADDR), key_node(KEYNODE_SERVER_ADDR));
+    futures::join!(
+        segment_node(KEYNODE_SERVER_ADDR),
+        key_node(KEYNODE_SERVER_ADDR),
+        client_node(KEYNODE_SERVER_ADDR),
+    );
+}
+
+async fn client_node(keynode_server_addr: &'static str) {
+    let (kn_outbound, kn_inbound) = connect_tcp_bytes();
+
+    let mut df = hydroflow_syntax! {};
+
+    df.run_async().await.unwrap();
 }
 
 async fn key_node(keynode_server_addr: &'static str) {
-    let (sn_outbound, sn_inbound, _sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_server_addr).unwrap()).await;
+    let (sn_outbound, sn_inbound, _sn_addr) =
+        bind_tcp_bytes(ipv4_resolve(keynode_server_addr).unwrap()).await;
+
+    // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
+
+    type LastContactMapLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
+    type BlockMapLattice = SetUnionHashSet<SegmentNodeID>;
+
+    // HashMap<BlockId, Set<SegmentNodeID>>
 
     let mut df = hydroflow_syntax! {
         segnode_demux = source_stream_serde(sn_inbound)
             -> map(|m| m.unwrap())
-            -> inspect(|(m, a)| { println!("{}: SN {:?} from {:?}", Utc::now(), m, a); })
+            -> inspect(|(m, a)| { println!("{}: KN: SN {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
@@ -74,28 +96,30 @@ async fn key_node(keynode_server_addr: &'static str) {
             -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        // LastContactMap: HashMap<Host, Time>
-        last_contact_map = join::<'tick, 'static>();
-        null() -> [0]last_contact_map;
-        last_contact_map -> map(|x: (SegmentNodeID, ((), (SocketAddr, Max<DateTime<Utc>>)))| x) -> null();
+        // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
+        last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, LastContactMapLattice>();
+        source_iter([(SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))])
+            -> persist()
+            -> [0]last_contact_map;
+        last_contact_map -> for_each(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()));
         heartbeats
-            -> map(|(id, _, addr, last_contact)| (id, (addr, last_contact)))
-            -> inspect(|(id, (addr, last_contact))| println!("{}: LC {:?} at {:?} from {:?}", Utc::now(), id, last_contact, addr))
+            -> map(|(id, _, addr, last_contact)| (id, DomPair::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
+            -> inspect(|(id, last_contact)| println!("{}: KN: LC {:?} - {last_contact:?}", Utc::now(), id))
             -> [1]last_contact_map;
 
-        // BlockMap: HashMap<BlockId, Set<Hosts>>
-        block_map = join::<'tick, 'static>();
-        null() -> [0]block_map;
-        block_map -> map(|x: (Block, ((), HashSet<SegmentNodeID>))| x) -> null();
+        // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
+        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, BlockMapLattice>();
+        source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
+            -> persist()
+            -> [0]block_map;
+        block_map -> for_each(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()));
         heartbeats
-            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, id.clone())))
-            -> fold_keyed::<Block>(HashSet::<SegmentNodeID>::new, |acc: &mut HashSet<SegmentNodeID>, id: SegmentNodeID| {
-                acc.insert(id);
-            })
+            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
+            -> map(|x| x)
             -> [1]block_map;
 
         segnode_demux[errs]
-          -> for_each(|(msg, addr)| println!("Unexpected SN message type: {:?} from {:?}", msg, addr));
+          -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
     };
 
     df.run_async().await.unwrap();
@@ -103,9 +127,9 @@ async fn key_node(keynode_server_addr: &'static str) {
 
 async fn segment_node(keynode_server_addr: &'static str) {
     let (kn_outbound, kn_inbound) = connect_tcp_bytes();
-    
+
     let sn_id = Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap();
-    let sn_id = SegmentNodeID { id: sn_id, }; //Uuid::new_v4(), };
+    let sn_id = SegmentNodeID { id: sn_id }; // Uuid::new_v4(), };
     let kn_addr: SocketAddr = ipv4_resolve(keynode_server_addr).unwrap();
 
     let hb_interval_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));
@@ -129,7 +153,7 @@ async fn segment_node(keynode_server_addr: &'static str) {
                     //acc.to_owned() // !#! not necessary for _keyed operators; not moved into the fold closure
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
-            -> inspect(|(m, a)| println!("{}: HB {:?} to {:?}", Utc::now(), m, a))
+            -> inspect(|(m, a)| println!("{}: {} SN: HB {:?} to {:?}", Utc::now(), context.current_tick(), m, a))
             -> dest_sink_serde(kn_outbound);
 
         kn_demux = source_stream_serde(kn_inbound)
@@ -142,7 +166,7 @@ async fn segment_node(keynode_server_addr: &'static str) {
             );
 
         kn_demux[heartbeat]
-          -> for_each(|addr| println!("{}: HB response from {:?}", Utc::now(), addr));
+          -> for_each(|addr| println!("{}: SN: HB response from {:?}", Utc::now(), addr));
 
         kn_demux[errs]
             -> null();
@@ -165,3 +189,42 @@ async fn segment_node(keynode_server_addr: &'static str) {
 
     flow.run_async().await;
 }
+
+// for regular join:
+//     insert: ("a", 0) - ("a", 1)
+//     insert: ("a", 0) - ("a", 2)
+
+//     lhs: ("a", [0])
+//     rhs: ("a", [1, 2])
+
+//     output:
+//     ("a", (0, 1))
+//     ("a", (0, 2))
+
+// for multiset_join
+//     insert: ("a", 0) - ("a", 1)
+//     insert: ("a", 0) - ("a", 2)
+
+//     lhs: ("a", [0, 0])
+//     rhs: ("a", [1, 2])
+
+//     output:
+//     ("a", (0, 1))
+//     ("a", (0, 2))
+//     ("a", (0, 1))
+//     ("a", (0, 2))
+
+// for lattice_join:
+//     insert: ("a", SetUnion([0])) -> LHS
+//     insert: ("a", SetUnion([3])) -> LHS
+//     insert: ("a", Min(0)) -> RHS
+//     insert: ("a", Max(2)) -> RHS
+
+//     lhs: ("a", SetUnion([0, 3]))
+//     rhs: ("a", Max(2))
+
+//     output:
+//     ("a", (SetUnion([0, 3]), Max(2))) -> flat_map() ->
+
+//     ("a", (0, Max(2)))
+//     ("a", (3, Max(2)))
