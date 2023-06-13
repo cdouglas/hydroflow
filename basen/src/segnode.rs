@@ -9,6 +9,7 @@ use tokio_stream::wrappers::IntervalStream;
 use std::net::SocketAddr;
 use crate::protocol::*;
 
+#[allow(dead_code)]
 pub(crate) async fn run_segnode(_cl_outbound: UdpSink, cl_inbound: UdpStream, opts: crate::Opts) {
 
     //let (kn_outbound, _kn_inbound, kn_addr) =

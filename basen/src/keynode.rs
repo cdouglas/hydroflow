@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use crate::protocol::*;
 
+#[allow(dead_code)]
 pub(crate) async fn run_keynode(_cl_outbound: UdpSink, cl_inbound: UdpStream, opts: crate::Opts) {
 
     // open separate channel for SN traffic

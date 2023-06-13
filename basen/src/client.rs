@@ -7,6 +7,7 @@ use uuid::Uuid;
 use std::net::SocketAddr;
 use crate::protocol::*;
 
+#[allow(dead_code)]
 pub(crate) async fn run_client(outbound: UdpSink, inbound: UdpStream, opts: Opts) {
     // server_addr is required for client
     let server_addr = match opts.server_addr {
