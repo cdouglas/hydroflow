@@ -1,4 +1,18 @@
-# Questions for Joe
+# Joe 2023-06-14
+
+
+
+# Lucky 2023-06-13
+
+Point: how to wrap things into Lattice types
+type LastContactMapLattice = DomPair<Max<DateTime<Utc>>, Point<SocketAddr>>;
+type LastContactMapLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
+- `SUHS`: things w/ the same time will include multiple socket addresses
+- looks at LHS first, if change then obliterate RHS; if LHS equal then try to merge RHS
+- `Point` crashes
+
+join: implementing set_union lattice, but lattice_join is allowing you to specify exactly the lattice you intend
+- lj a generalization of regular join
 
 # Questions for Lucky
 
@@ -7,8 +21,7 @@
 keyed + non-keyed version
 - keyed/non-keyed version; type of reduce is different (shouldn't be, but is)
 - non-keyed: moved, but doesn't work w/ hash tables & other machinery underneath
-- now, get passed mutable value, fold/reduce new data, and that's it (nothing to return)
-
+- now, get passed mutable value, fold/reduce new data, and that's it (nothing to return)+
 2.  The following duplicates and repeats the `canned_blocks` map for each HB. Why?
         hb_timer = source_stream(hb_stream)
             -> map(|_| (kn_addr, ()))
@@ -33,7 +46,11 @@ when `fold_keyed` is static, then it reschedules itself; still has data, but if 
 - bug? re-triggers if something happens everywhere
 
 3. Currently going crazy instead of triggering a response
+- right now, whenever _any_ event triggers a flow to run, everything runs, not just the subgraph
+
+
 4. Why is `Cargo.lock` checked in?
+- Good for CI, and for binaries. Libraries can leave it out, let it bind to the project that includes them
 
 # Lucky 2023-06-12
 
