@@ -60,13 +60,6 @@ pub struct SegmentNodeID {
     // add metadata for KN to determine location
 }
 
-#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug, Default)]
-#[rustfmt::skip]
-pub struct KeyID {
-    key: String,
-    version: u64,
-}
-
 // client -> key node
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
