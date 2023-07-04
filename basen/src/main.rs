@@ -2,7 +2,8 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::set_union::SetUnionHashSet;
+use hydroflow::lattices::map_union::MapUnionHashMap;
+use hydroflow::lattices::set_union::{SetUnionHashSet, SetUnion};
 use hydroflow::lattices::{DomPair, Max};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -66,26 +67,35 @@ async fn main() {
 async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
 
+    let canned_keys = vec![
+        (KeyID { key: "dingo".to_owned(), version: 0u64 },
+            vec![Block { pool: "2023874_0".to_owned(), id: 2348980u64 }]),
+    ];
     let canned_blocks = vec![
         Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
         Block { pool: "2023874_0".to_owned(), id: 2348985u64 }];
     futures::join!(
         segment_node(KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
         segment_node(KEYNODE_SN_ADDR, Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap(), &canned_blocks[..]),
-        key_node(KEYNODE_SN_ADDR, keynode_cl_addr),
+        key_node(KEYNODE_SN_ADDR, keynode_cl_addr, &canned_keys),
     );
 }
 
-async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr) {
+async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(KeyID, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
+    // clone keys
+    let init_keys = init_keys.to_vec();
+
     // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
 
     type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
     type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
+    //type KeyBlockLattice = MapUnionHashMap<String,DomPair<u64,SetUnion<Block>>>;
+    type KeyBlockLattice = SetUnionHashSet<Block>;
 
     let mut df = hydroflow_syntax! {
         // client
@@ -100,8 +110,14 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
                 );
 
         client_demux[info]
-            -> map(|(_cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
-            -> dest_sink_serde(cl_outbound);
+            -> inspect(|(m, a)| { println!("{}: KN: INFO {:?} from {:?}", Utc::now(), m, a); })
+            // here... need to map the request into a lattice type
+            // we want to return... either the version requested or a timestamp we choose and map that
+            // against the key->block map.
+            // XXX What about error handling?
+            -> map(|(cl_req, addr)| (KeyID { key: cl_req.key, version: 0u64}, addr)) // TODO semver
+            -> [0]key_block_map;
+
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
 
@@ -126,25 +142,49 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
+        key_block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, KeyBlockLattice>()
+            -> inspect(|x| println!("{}: LOOKUP_KEY_BLOCK_MAP: KN: {x:?}", Utc::now()))
+            -> map(|x| x)
+            -> null();
+
+        // initial key->block map from init_keys (passed in)
+        keys = source_iter(init_keys)
+            // XXX how to distinguish between different versions of the same key/views?
+            -> map(|(key, blocks)| (key, SetUnionHashSet::new_from(blocks.into()))) // magic: vec to hashset to lattice
+            -> [1]key_block_map;
+
         // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
-        last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, LastContactLattice>();
-        source_iter([(SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))])
-            -> persist()
-            -> [0]last_contact_map;
-        last_contact_map -> for_each(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()));
+        last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, LastContactLattice>()
+            -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
+            // filter if current time - last_contact > timeout
+            -> map(|x| x)
+            -> null();
+
+        // XXX ...why? replace w/ client input
+        //source_iter([
+        //    (SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))
+        //    ])
+        //    -> persist()
+        //    -> [0]last_contact_map;
         heartbeats
             -> map(|(id, _, addr, last_contact)| (id, DomPair::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
             -> inspect(|(id, last_contact)| println!("{}: KN: LC {:?} - {last_contact:?}", Utc::now(), id))
             -> [1]last_contact_map;
 
         // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
-        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, BlockSetLattice>();
+        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, BlockSetLattice>()
+            -> inspect(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()))
+            -> map(|x| x)
+            -> [0]last_contact_map;
+
+        // replace w/ client input...
         source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
             -> persist()
             -> [0]block_map;
-        block_map -> for_each(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()));
         heartbeats
-            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
+            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)|
+                    blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()])))
+                )
             -> [1]block_map;
 
         segnode_demux[errs]
@@ -200,9 +240,6 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
 
         kn_demux[errs]
             -> null();
-
-
-
 
         // // Define shared inbound and outbound channels
         // inbound_chan = source_stream_serde(cl_inbound)
