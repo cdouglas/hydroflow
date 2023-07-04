@@ -11,6 +11,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::protocol::*;
+use crate::client::run_client;
 
 mod client;
 mod helpers;
@@ -20,8 +21,7 @@ mod segnode;
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
-    Keynode,
-    Segnode,
+    Servers, // run all servers in one process, for now
     Client,
 }
 
@@ -47,8 +47,24 @@ struct Opts {
 
 #[hydroflow::main]
 async fn main() {
+    let opts = Opts::parse();
+    // if no addr was provided, we ask the OS to assign a local port by passing in "localhost:0"
+    let addr = opts
+        .addr
+        .unwrap_or_else(|| ipv4_resolve("localhost:0").unwrap());
+
+    match opts.role {
+        Role::Servers => {
+            run_servers(addr, opts).await;
+        }
+        Role::Client => {
+            run_client(addr, opts).await;
+        }
+    }
+}
+
+async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
-    const KEYNODE_CL_ADDR: &str = "127.0.0.55:4346";
 
     let canned_blocks = vec![
         Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
@@ -56,27 +72,15 @@ async fn main() {
     futures::join!(
         segment_node(KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
         segment_node(KEYNODE_SN_ADDR, Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap(), &canned_blocks[..]),
-        key_node(KEYNODE_SN_ADDR, KEYNODE_CL_ADDR),
-        client_node(KEYNODE_CL_ADDR),
+        key_node(KEYNODE_SN_ADDR, keynode_cl_addr),
     );
 }
 
-#[allow(unused_variables, dead_code)]
-async fn client_node(keynode_server_addr: &'static str) {
-    let (kn_outbound, kn_inbound) = connect_tcp_bytes();
-
-    let mut df = hydroflow_syntax! {
-
-    };
-
-    df.run_async().await.unwrap();
-}
-
-async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: &'static str) {
-    let (cl_outbound, cl_inbound, _cl_addr) =
-        bind_tcp_bytes(ipv4_resolve(keynode_client_addr).unwrap()).await;
-    let (sn_outbound, sn_inbound, _sn_addr) =
-        bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
+async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr) {
+    let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
+    let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
+    println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
+    println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
     // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
 
@@ -96,7 +100,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: &'static s
                 );
 
         client_demux[info]
-            -> map(|(cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
+            -> map(|(_cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
             -> dest_sink_serde(cl_outbound);
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
@@ -141,7 +145,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: &'static s
         block_map -> for_each(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()));
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
-            -> map(|x| x)
             -> [1]block_map;
 
         segnode_demux[errs]
