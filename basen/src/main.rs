@@ -89,16 +89,18 @@ async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
 }
 
 async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
-    let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
+    let (_cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
     let canned_reqs = vec![
-        CKRequest::Info { id: ClientID {
-            id: Uuid::new_v4(),
+        (CKRequest::Info {
+            id: ClientID { id: Uuid::new_v4() },
+            key: "dingo".to_owned(),
         },
-        key: "dingo".to_owned(), }
+        SocketAddr::from(([127, 0, 0, 1], 4344))
+        ),
     ];
 
     // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
@@ -109,20 +111,26 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
 
     let mut df = hydroflow_syntax! {
+
         // client
-        client_demux = source_stream_serde(cl_inbound)
-            -> map(Result::unwrap)
+        client_demux = //source_stream_serde(cl_inbound)
+            //-> map(Result::unwrap)
+        ////////
+            source_iter(canned_reqs)
+            -> persist()
+        /////////
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr), var_args!(info, errs)|
                     match cl_req {
-                        CKRequest::Info { .. } => info.give((cl_req, addr)),
+                        CKRequest::Info { id, key, .. } => info.give((key, (id, addr))), // TODO: keep id->addr map elsewhere?
                         _ => errs.give((cl_req, addr)),
                     }
                 );
 
         client_demux[info]
-            -> map(|(_cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
-            -> dest_sink_serde(cl_outbound);
+            -> [0]key_map;
+            //-> map(|(_cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
+            //-> dest_sink_serde(cl_outbound);
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
 
@@ -159,6 +167,8 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> lattice_fold::<'tick, hydroflow::lattices::map_union::MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
             -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
             -> null();
+            //-> dest_sink_serde(cl_outbound);
+
         heartbeats
             -> map(|(id, _, addr, last_contact)| (id, DomPair::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
             -> inspect(|(id, last_contact)| println!("{}: KN: LC {:?} - {last_contact:?}", Utc::now(), id))
@@ -186,10 +196,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> flat_map(|(key, (_, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([key.clone()]))))
             -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
             -> [0]block_map;
-
-        source_iter([("dingo".to_owned(), ()), ("yak".to_owned(),())])
-            -> persist()
-            -> [0]key_map;
 
         source_iter(init_keys)
             //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
