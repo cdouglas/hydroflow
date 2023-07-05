@@ -1,6 +1,26 @@
+# 2023-07-04
+
+Achieve for today: Client lookup and request to segment node
+
+OK... so is the keymap a versioned key to a set of blocks, or a key with a versioned set of blocks?
+
+Will EVERY mapping need to be demux'd by the operation?
+
+Why the unit type?
+        `block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, BlockSetLattice>()`
+
+How does this merge back into a request at the end of the pipeline?
+
+How do I retain information through this pipeline i.e., the client ID and other information?
+
+Ask Lucky/Mingwei about move and flat_map in block_map thing
+
 # Joe 2023-06-14
 
-
+## hydro
+- worked w/ Lucky on the impl (walk through)
+- building the pipeline we discussed last week for client requests
+- next week: chain replication
 
 # Lucky 2023-06-13
 

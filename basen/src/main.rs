@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::set_union::SetUnionHashSet;
+use hydroflow::lattices::set_union::{SetUnionHashSet, SetUnion};
 use hydroflow::lattices::{DomPair, Max};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -127,11 +128,17 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> dest_sink_serde(sn_outbound);
 
         // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
-        last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, LastContactLattice>();
-        source_iter([(SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))])
-            -> persist()
-            -> [0]last_contact_map;
-        last_contact_map -> for_each(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()));
+        //last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<Block>, LastContactLattice>();
+        last_contact_map = join::<'tick, 'static>();
+        //source_iter([(SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))])
+        //    -> persist()
+        //    -> [0]last_contact_map;
+        last_contact_map
+            -> map(|(_, (block, last_contact)): (SegmentNodeID, (Block, DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)) | (block, last_contact.into_reveal().1))
+            -> map(|(b, s)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
+            -> lattice_fold::<'tick, hydroflow::lattices::map_union::MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
+            -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
+            -> null();
         heartbeats
             -> map(|(id, _, addr, last_contact)| (id, DomPair::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
             -> inspect(|(id, last_contact)| println!("{}: KN: LC {:?} - {last_contact:?}", Utc::now(), id))
@@ -142,7 +149,13 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
             -> persist()
             -> [0]block_map;
-        block_map -> for_each(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()));
+        block_map
+            -> inspect(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()))
+            //-> map(|x| x)
+            // can we replace `clone()` with `to_owned()`? The compiler thinks so!
+            //-> flat_map(|(block, (_, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, SetUnionHashSet::new_from([block.clone()]))))
+            -> flat_map(|(block, (_, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, block.clone())))
+            -> [0]last_contact_map;
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
