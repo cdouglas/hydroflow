@@ -158,11 +158,12 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
         //last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<Block>, LastContactLattice>();
         last_contact_map = join::<'tick, 'static>();
-        //source_iter([(SegmentNodeID { id: Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap() }, SetUnionHashSet::new_from([()]))])
-        //    -> persist()
-        //    -> [0]last_contact_map;
         last_contact_map
-            -> map(|(_, (block, last_contact)): (SegmentNodeID, (Block, DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)) | (block, last_contact.into_reveal().1))
+            -> map(|(_, ((clikey, block), last_contact)):
+            // uff.
+                (SegmentNodeID, ((SetUnionHashSet<((ClientID, SocketAddr), String)>, Block),
+                                 DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)
+                ) | (block, last_contact.into_reveal().1))
             -> map(|(b, s)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
             -> lattice_fold::<'tick, hydroflow::lattices::map_union::MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
             -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
@@ -175,25 +176,18 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> [1]last_contact_map;
 
         // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
-        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<String>, BlockSetLattice>();
-
-        //source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
-        //    -> persist()
-        //    -> [0]block_map;
-
-        block_map
+        // XXX convert from a lattice_join?
+        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<((ClientID, SocketAddr), String)>, BlockSetLattice>()
             -> inspect(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()))
-            //-> map(|x| x)
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
-            //-> flat_map(|(block, (_, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, SetUnionHashSet::new_from([block.clone()]))))
-            -> flat_map(|(block, (_, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, block.clone())))
+            -> flat_map(|(block, (clikey, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, (clikey.clone(), block.clone()))))
             -> [0]last_contact_map;
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
 
-        key_map = join::<'tick, 'static>()
-            -> flat_map(|(key, (_, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([key.clone()]))))
+        key_map = join::<'tick, 'static>() // where to stash the client context?
+            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([(cli.clone(), key.clone())]))))
             -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
             -> [0]block_map;
 
