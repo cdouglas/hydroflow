@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::set_union::{SetUnionHashSet, SetUnion};
+use hydroflow::lattices::set_union::SetUnionHashSet;
 use hydroflow::lattices::{DomPair, Max};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -67,25 +66,46 @@ async fn main() {
 async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
 
+    let canned_keys = vec![
+        ("dingo".to_owned(), vec![
+            Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
+            Block { pool: "2023874_0".to_owned(), id: 2348985u64 },
+        ]),
+        ("yak".to_owned(), vec![
+            Block { pool: "2023874_0".to_owned(), id: 2348990u64 }
+        ]),
+    ];
+
     let canned_blocks = vec![
         Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
-        Block { pool: "2023874_0".to_owned(), id: 2348985u64 }];
+        Block { pool: "2023874_0".to_owned(), id: 2348985u64 },
+        Block { pool: "2023874_0".to_owned(), id: 2348990u64 },
+    ];
     futures::join!(
         segment_node(KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
         segment_node(KEYNODE_SN_ADDR, Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap(), &canned_blocks[..]),
-        key_node(KEYNODE_SN_ADDR, keynode_cl_addr),
+        key_node(KEYNODE_SN_ADDR, keynode_cl_addr, &canned_keys[..]),
     );
 }
 
-async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr) {
+async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
-    // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
+    let canned_reqs = vec![
+        CKRequest::Info { id: ClientID {
+            id: Uuid::new_v4(),
+        },
+        key: "dingo".to_owned(), }
+    ];
 
-    type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
+    // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
+    let init_keys = init_keys.to_vec();
+
+    // changed to a regular join
+    //type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
     type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
 
     let mut df = hydroflow_syntax! {
@@ -145,10 +165,12 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> [1]last_contact_map;
 
         // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
-        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<()>, BlockSetLattice>();
-        source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
-            -> persist()
-            -> [0]block_map;
+        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<String>, BlockSetLattice>();
+
+        //source_iter([(Block { pool: "2023874_0".to_owned(), id: 2348980u64 }, SetUnionHashSet::new_from([()]))])
+        //    -> persist()
+        //    -> [0]block_map;
+
         block_map
             -> inspect(|x| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()))
             //-> map(|x| x)
@@ -159,6 +181,19 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
+
+        key_map = join::<'tick, 'static>()
+            -> flat_map(|(key, (_, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([key.clone()]))))
+            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
+            -> [0]block_map;
+
+        source_iter([("dingo".to_owned(), ()), ("yak".to_owned(),())])
+            -> persist()
+            -> [0]key_map;
+
+        source_iter(init_keys)
+            //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
+            -> [1]key_map;
 
         segnode_demux[errs]
           -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
@@ -179,16 +214,16 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
 
     let hb_interval_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));
     let mut flow = hydroflow_syntax! {
-        canned_blocks = source_iter(init_blocks);
         // each hb, should include all the blocks not-yet reported in the KN epoch
         // join w/ KN pool to determine to which KN the blocks should be reported
 
         hb_timer = source_stream(hb_interval_stream)
             -> map(|_| (kn_addr, ()))
             -> [0]hb_report;
-        canned_blocks
+        source_iter(init_blocks)
             -> map(|block| (kn_addr, block))
             -> [1]hb_report;
+
         hb_report = join::<'tick, 'static>()
             -> fold_keyed::<'tick>(Vec::new,
                 |acc: &mut Vec<Block>, (_, blk): ((), Block)| {
