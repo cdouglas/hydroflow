@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::set_union::SetUnionHashSet;
+use hydroflow::lattices::map_union::{MapUnion, MapUnionHashMap};
+use hydroflow::lattices::set_union::{SetUnion, SetUnionHashSet};
 use hydroflow::lattices::{DomPair, Max};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -165,18 +166,14 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> map(|(_, ((clikey, block), last_contact)):
                 (SegmentNodeID, ((SetUnionHashSet<((ClientID, SocketAddr), String)>, Block),
                                  DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)
-                ) | (block, (clikey, last_contact.into_reveal().1.into_reveal())))
+                ) | (block, (clikey, last_contact.into_reveal().1)))
             //-> inspect(|x| println!("{}: DEBUG1: {:?}", Utc::now(), x))
-            -> flat_map(|(block, (clikey, addrset)):
-                (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, HashSet<SocketAddr>)
-                )| addrset.into_iter().map(move |addr| (block.clone(), (addr, clikey.clone()))))
-            //-> inspect(|x| println!("{}: DEBUG2: {:?}", Utc::now(), x))
-            -> fold_keyed::<'tick>(|| vec![], |acc: &mut Vec<(SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)>, (block, addr): (SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)| {
-                acc.push((block, addr));
-                acc.to_owned() // why is this to_owned() necessary?
-            })
+            -> map(|(block, (clikey, addrset)):
+                (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<SocketAddr>)
+                )| MapUnionHashMap::new(HashMap::from_iter([(block, SetUnionHashSet::new_from([(clikey, addrset)]))])))
+            //-> inspect(|x: MapUnionHashMap<Block,(SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<SocketAddr>)>| println!("{}: DEBUG2: {:?}", Utc::now(), x))
             //-> map(|(b, s): (Block, SetUnionHashSet<SocketAddr>)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
-            //-> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
+            -> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<(SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<SocketAddr>)>>>()
             -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
             -> null();
             //-> dest_sink_serde(cl_outbound);
@@ -259,8 +256,6 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
 
         kn_demux[errs]
             -> null();
-
-
 
 
         // // Define shared inbound and outbound channels
