@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
@@ -159,13 +160,23 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         //last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<Block>, LastContactLattice>();
         last_contact_map = join::<'tick, 'static>();
         last_contact_map
-            -> map(|(_, ((clikey, block), last_contact)):
             // uff.
+            //-> inspect(|x| println!("{}: DEBUG0: {:?}", Utc::now(), x))
+            -> map(|(_, ((clikey, block), last_contact)):
                 (SegmentNodeID, ((SetUnionHashSet<((ClientID, SocketAddr), String)>, Block),
                                  DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)
-                ) | (block, last_contact.into_reveal().1))
-            -> map(|(b, s)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
-            -> lattice_fold::<'tick, hydroflow::lattices::map_union::MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
+                ) | (block, (clikey, last_contact.into_reveal().1.into_reveal())))
+            //-> inspect(|x| println!("{}: DEBUG1: {:?}", Utc::now(), x))
+            -> flat_map(|(block, (clikey, addrset)):
+                (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, HashSet<SocketAddr>)
+                )| addrset.into_iter().map(move |addr| (block.clone(), (addr, clikey.clone()))))
+            //-> inspect(|x| println!("{}: DEBUG2: {:?}", Utc::now(), x))
+            -> fold_keyed::<'tick>(|| vec![], |acc: &mut Vec<(SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)>, (block, addr): (SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)| {
+                acc.push((block, addr));
+                acc.to_owned() // why is this to_owned() necessary?
+            })
+            //-> map(|(b, s): (Block, SetUnionHashSet<SocketAddr>)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
+            //-> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
             -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
             -> null();
             //-> dest_sink_serde(cl_outbound);
