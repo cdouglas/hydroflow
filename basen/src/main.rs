@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::map_union::{MapUnion,MapUnionHashMap};
-use hydroflow::lattices::set_union::{SetUnion, SetUnionHashSet};
+use hydroflow::lattices::map_union::{MapUnionHashMap};
+use hydroflow::lattices::set_union::{SetUnionHashSet};
 use hydroflow::lattices::{DomPair, Max};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -211,7 +211,8 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> lattice_fold::<'tick, MapUnionHashMap<Block, SetUnionHashSet<((ClientID, SocketAddr), String)>>>()
             // -> fold(MapUnionHashMap<Block, SetUnion<HashSet<((ClientID, SocketAddr), String)>>>::default(), 
             //         hydroflow::lattices::Merge::merge_owned)
-            //-> inspect(|x| println!("{}: KN: INVERTED_WTFTI: {x:?}", Utc::now()))
+            -> inspect(|x| println!("{}: KN: INVERTED_WTFTI: {x:?}", Utc::now()))
+            -> flat_map(|x| x.into_reveal())
             -> [0]block_map;
 
             //test_vec.push(MapUnionHashMap::new(HashMap::from_iter([
