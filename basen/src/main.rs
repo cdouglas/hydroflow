@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
 use hydroflow::lattices::map_union::{MapUnionHashMap};
-use hydroflow::lattices::set_union::{SetUnionHashSet};
-use hydroflow::lattices::{DomPair, Max};
+use hydroflow::lattices::set_union::{SetUnionHashSet, SetUnion};
+use hydroflow::lattices::{DomPair, Max, Pair};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
 use tokio::time;
@@ -111,6 +111,8 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     // changed to a regular join
     //type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
     type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
+    type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
+    type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
 
     let mut df = hydroflow_syntax! {
 
@@ -159,66 +161,61 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
 
         // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
         //last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<Block>, LastContactLattice>();
-        last_contact_map = join::<'tick, 'static>();
-        last_contact_map
-            -> inspect(|x| println!("{}: KN: DEBUG2: {x:?}", Utc::now()))
-            // uff.
-            //-> inspect(|x| println!("{}: DEBUG0: {:?}", Utc::now(), x))
-            -> map(|(_, ((clikey, block), last_contact)):
-                (SegmentNodeID, ((SetUnionHashSet<((ClientID, SocketAddr), String)>, Block),
-                                 DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)
-                ) | (block, (clikey, last_contact.into_reveal().1.into_reveal())))
-            //-> inspect(|x| println!("{}: DEBUG1: {:?}", Utc::now(), x))
-            -> flat_map(|(block, (clikey, addrset)):
-                (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, HashSet<SocketAddr>)
-                )| addrset.into_iter().map(move |addr| (block.clone(), (addr, clikey.clone()))))
-            //-> inspect(|x| println!("{}: DEBUG2: {:?}", Utc::now(), x))
-            -> fold_keyed::<'tick>(|| vec![], |acc: &mut Vec<(SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)>, (block, addr): (SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)| {
-                acc.push((block, addr));
-                //acc.to_owned() // why is this to_owned() necessary? // XXX it's not; fold_keyed doesn't retain this context
-            })
-            //-> map(|(b, s): (Block, SetUnionHashSet<SocketAddr>)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
-            //-> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
-            -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
-            -> null();
-            //-> dest_sink_serde(cl_outbound);
+        //last_contact_map = lattice_join::<'tick, 'static, Joe, DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>>();
+        //last_contact_map
+        //    -> inspect(|x| println!("{}: KN: DEBUG2: {x:?}", Utc::now()))
+        //    // uff.
+        //    //-> inspect(|x| println!("{}: DEBUG0: {:?}", Utc::now(), x))
+        //    -> map(|(_, ((clikey, block), last_contact)):
+        //                        (SegmentNodeID,
+        //                            (Joe,
+        //                             DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)) | 
+        //        (block, (clikey, last_contact.into_reveal().1.into_reveal())))
+        //    //-> inspect(|x| println!("{}: DEBUG1: {:?}", Utc::now(), x))
+        //    -> flat_map(|(block, (clikey, addrset)):
+        //        (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, HashSet<SocketAddr>)
+        //        )| addrset.into_iter().map(move |addr| (block.clone(), (addr, clikey.clone()))))
+        //    //-> inspect(|x| println!("{}: DEBUG2: {:?}", Utc::now(), x))
+        //    -> fold_keyed::<'tick>(|| vec![], |acc: &mut Vec<(SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)>, (block, addr): (SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)| {
+        //        acc.push((block, addr));
+        //        //acc.to_owned() // why is this to_owned() necessary? // XXX it's not; fold_keyed doesn't retain this context
+        //    })
+        //    //-> map(|(b, s): (Block, SetUnionHashSet<SocketAddr>)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
+        //    //-> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
+        //    -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
+        //    -> null();
+        //    //-> dest_sink_serde(cl_outbound);
+
+        last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
+            -> for_each(|x| println!("{}: LCM: {:?}", Utc::now(), x));
 
         heartbeats
-            -> map(|(id, _, addr, last_contact)| (id, DomPair::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
-            -> inspect(|x| println!("{}: KN: DEBUG1: {x:?}", Utc::now()))
+            -> map(|(id, _, addr, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
+            -> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
         // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
         // XXX convert from a lattice_join?
+        // Form a Joe: SetUnion<HashSet<(((ClientID, SocketAddr), String), Block)>>;
+
         block_map = lattice_join::<'tick, 'static, SetUnionHashSet<((ClientID, SocketAddr), String)>, BlockSetLattice>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
-            -> flat_map(|(block, (clikey, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, (clikey.clone(), block.clone()))))
-            -> inspect(|x| println!("{}: KN: DEBUG0: {x:?}", Utc::now()))
+            -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, Pair::new_from(clikeyset.clone(), SetUnionHashSet::new_from([block.clone()])))))
+            // -> map(|(sn, (clikey, block))| (sn, SetUnionHashSet::new_from([(clikey, block)])))
+            // output of previous line is of type (SegmentNodeId, SetUnionHashSet<(SetUnionHashSet<((ClientID, SocketAddr), String)>, Block)>)
+            -> inspect(|x| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
+            -> map(|x| x)
+            -> map(|x| x)
             -> [0]last_contact_map;
+
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
 
-        //key_map = join::<'tick, 'static>() // where to stash the client context?
-        //    -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([(cli.clone(), key.clone())]))))
-        //    -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
-        //    -> [0]block_map;
-
-        key_map = join::<'tick, 'static>()
+        key_map = join::<'tick, 'static>() // where to stash the client context?
             -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([(cli.clone(), key.clone())]))))
-            -> map(|(block, ctxt)| HashMap::from_iter([(block, ctxt)]))
-            -> map(|x| MapUnionHashMap::<Block, SetUnionHashSet<((ClientID, SocketAddr), String)>>::new(x))
-            -> lattice_fold::<'tick, MapUnionHashMap<Block, SetUnionHashSet<((ClientID, SocketAddr), String)>>>()
-            // -> fold(MapUnionHashMap<Block, SetUnion<HashSet<((ClientID, SocketAddr), String)>>>::default(), 
-            //         hydroflow::lattices::Merge::merge_owned)
-            -> inspect(|x| println!("{}: KN: INVERTED_WTFTI: {x:?}", Utc::now()))
-            -> flat_map(|x| x.into_reveal())
+            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
             -> [0]block_map;
-
-            //test_vec.push(MapUnionHashMap::new(HashMap::from_iter([
-            //    (0, SetUnionHashSet::new(HashSet::from_iter(val_a.clone()))),
-            //    (1, SetUnionHashSet::new(HashSet::from_iter(val_b.clone()))),
-            //])));
 
         source_iter(init_keys)
             //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
