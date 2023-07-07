@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
 use hydroflow::lattices::set_union::{SetUnionHashSet};
-use hydroflow::lattices::{DomPair, Max, Pair};
+use hydroflow::lattices::{DomPair, Max, Pair, Point};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
 use tokio::time;
@@ -110,7 +110,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     //type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
     type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
     type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
-    type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
+    type Chris = DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>;
 
     let mut df = hydroflow_syntax! {
 
@@ -184,11 +184,35 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         //    -> null();
         //    //-> dest_sink_serde(cl_outbound);
 
+        // LCM: (SegmentNodeID { id: 454147e2-ef1c-4a2f-bcbc-a9a774a4bb62 },
+        //    (Pair { a: SetUnion({((ClientID { id: 2ddb484b-4f32-4a26-acc2-fb5eca607a8a }, 127.0.0.1:4344), "dingo")}),
+        //            b: SetUnion({Block { pool: "2023874_0", id: 2348980 }, Block { pool: "2023874_0", id: 2348985 }})
+        //          },
+        //     DomPair { key: Max(2023-07-07T17:53:05.782872965Z), val: SetUnion({127.0.0.1:45052}) }))
+
+        //type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
+        //type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
         last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
-            -> for_each(|x| println!("{}: LCM: {:?}", Utc::now(), x));
+        // uff.
+            //-> filter(|(_, (_, hbts)): &(_, (_, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
+            -> inspect(|x: &(SegmentNodeID, (Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>,
+                                            DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
+                            println!("{}: KN: LCM: {x:?}", Utc::now()))
+            -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
+            -> map(|(_, (clikeyblock, hbts))| (clikeyblock.into_reveal(), hbts.into_reveal().1.val))
+            -> flat_map(|((clikeyset, blockset), sn_addr)| clikeyset.into_reveal().into_iter().map(move |((id, addr), key)| (key, id, addr, blockset.clone(), sn_addr)))
+            -> flat_map(|(key, cl_id, cl_addr, blockset, sn_addr)|
+                    blockset.into_reveal().into_iter().map(move |block|
+                        (key.clone(), (cl_id.clone(), cl_addr, block, sn_addr))))
+            // FUCK. NO. Needs multiple folds???
+            -> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
+                    println!("{}: LCM: {:?}", Utc::now(), x))
+            //-> inspect(|x: &((SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>), SocketAddr)|
+            //        println!("{}: LCM: {:?}", Utc::now(), x))
+            -> null();
 
         heartbeats
-            -> map(|(id, _, addr, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>::new_from(last_contact, SetUnionHashSet::new_from([addr]))))
+            -> map(|(id, _, addr, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(addr))))
             -> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
