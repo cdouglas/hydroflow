@@ -1,10 +1,8 @@
-use std::collections::{HashSet, HashMap};
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::map_union::{MapUnionHashMap};
-use hydroflow::lattices::set_union::{SetUnionHashSet, SetUnion};
+use hydroflow::lattices::set_union::{SetUnionHashSet};
 use hydroflow::lattices::{DomPair, Max, Pair};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
@@ -201,11 +199,16 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         block_map = lattice_join::<'tick, 'static, SetUnionHashSet<((ClientID, SocketAddr), String)>, BlockSetLattice>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, Pair::new_from(clikeyset.clone(), SetUnionHashSet::new_from([block.clone()])))))
-            // -> map(|(sn, (clikey, block))| (sn, SetUnionHashSet::new_from([(clikey, block)])))
-            // output of previous line is of type (SegmentNodeId, SetUnionHashSet<(SetUnionHashSet<((ClientID, SocketAddr), String)>, Block)>)
             -> inspect(|x| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
-            -> map(|x| x)
-            -> map(|x| x)
+            // We think the block is unique, but let's check
+            -> map(|(key, val)| {
+                let b: &SetUnionHashSet<Block> = val.as_reveal_ref().1;
+                let b2 = b.as_reveal_ref();
+                if b2.len() > 1 {
+                    panic!()
+                }
+                (key, val)
+              })
             -> [0]last_contact_map;
 
         heartbeats
