@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
-use hydroflow::lattices::map_union::{MapUnion, MapUnionHashMap};
+use hydroflow::lattices::map_union::MapUnionHashMap;
 use hydroflow::lattices::set_union::{SetUnionHashSet};
 use hydroflow::lattices::{DomPair, Max, Pair, Point};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
@@ -69,18 +69,18 @@ async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
 
     let canned_keys = vec![
         ("dingo".to_owned(), vec![
-            Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
-            Block { pool: "2023874_0".to_owned(), id: 2348985u64 },
+            Block { pool: "x".to_owned(), id: 200u64 },
+            Block { pool: "x".to_owned(), id: 300u64 },
         ]),
         ("yak".to_owned(), vec![
-            Block { pool: "2023874_0".to_owned(), id: 2348990u64 }
+            Block { pool: "x".to_owned(), id: 400u64 }
         ]),
     ];
 
     let canned_blocks = vec![
-        Block { pool: "2023874_0".to_owned(), id: 2348980u64 },
-        Block { pool: "2023874_0".to_owned(), id: 2348985u64 },
-        Block { pool: "2023874_0".to_owned(), id: 2348990u64 },
+        Block { pool: "x".to_owned(), id: 200u64 },
+        Block { pool: "x".to_owned(), id: 300u64 },
+        Block { pool: "x".to_owned(), id: 400u64 },
     ];
     futures::join!(
         segment_node(KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
@@ -95,20 +95,29 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
+    let cli_a_id = Uuid::new_v4();
+    let cli_b_id = Uuid::new_v4();
     let canned_reqs = vec![
         (
             CKRequest::Info {
-                id: ClientID { id: Uuid::new_v4() },
+                id: ClientID { id: cli_a_id },
                 key: "dingo".to_owned(),
             },
             SocketAddr::from(([127, 0, 0, 1], 4344))
         ),
         (
             CKRequest::Info {
-                id: ClientID { id: Uuid::new_v4() },
+                id: ClientID { id: cli_b_id },
                 key: "dingo".to_owned(),
             },
             SocketAddr::from(([127, 0, 0, 1], 4345))
+        ),
+        (
+            CKRequest::Info {
+                id: ClientID { id: cli_a_id },
+                key: "yak".to_owned(),
+            },
+            SocketAddr::from(([127, 0, 0, 1], 4344))
         ),
     ];
 
@@ -176,8 +185,8 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
                             println!("{}: -> LCM: {x:?}", Utc::now()))
             // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
             -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
-            // XXX keys are scalars, not lattices
             -> map(|(_, (clikeyblock, hbts))| (clikeyblock.into_reveal(), hbts.into_reveal().1.val))
+            // XXX instead of un-latticing these and re-lattice-folding them, is there an opportunity to pass through?
             -> flat_map(|((clikeyset, blockset), sn_addr)| clikeyset.into_reveal().into_iter().map(move |((id, addr), key)| (key, id, addr, blockset.clone(), sn_addr)))
             -> flat_map(|(key, cl_id, cl_addr, blockset, sn_addr)|
                     blockset.into_reveal().into_iter().map(move |block|
@@ -190,7 +199,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
                         )])
                     )]))
             -> lattice_fold::<'tick, MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>>()
-            // FUCK. NO. Needs multiple folds???
             //-> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
             -> inspect(|x: &MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>|
                     println!("{}: <- LCM: {:?}", Utc::now(), x))
@@ -203,23 +211,21 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
-        // BlockMap: HashMap<BlockId, Set<SegmentNodeID>>
-        // XXX convert from a lattice_join?
-        // Form a Joe: SetUnion<HashSet<(((ClientID, SocketAddr), String), Block)>>;
-
         block_map = lattice_join::<'tick, 'static, SetUnionHashSet<((ClientID, SocketAddr), String)>, BlockSetLattice>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
+            // XXX NO! A lattice join over this type will collapse the mapping of requests to blocks, yielding
+            //         Pair<{clients, keys}, {blocks}>, which loses the mapping requests to blocks
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, Pair::new_from(clikeyset.clone(), SetUnionHashSet::new_from([block.clone()])))))
             -> inspect(|x| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
-            // We think the block is unique, but let's check
-            -> map(|(key, val)| {
-                let b: &SetUnionHashSet<Block> = val.as_reveal_ref().1;
-                let b2 = b.as_reveal_ref();
-                if b2.len() > 1 {
-                    panic!()
-                }
-                (key, val)
-              })
+            //// We think the block is unique, but let's check
+            //-> map(|(key, val)| {
+            //    let b: &SetUnionHashSet<Block> = val.as_reveal_ref().1;
+            //    let b2 = b.as_reveal_ref();
+            //    if b2.len() > 1 {
+            //        panic!()
+            //    }
+            //    (key, val)
+            //  })
             -> [0]last_contact_map;
 
         heartbeats
@@ -253,6 +259,8 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
     let kn_addr: SocketAddr = ipv4_resolve(keynode_server_addr).unwrap();
 
     let hb_interval_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));
+
+    println!("{}: SN: Starting {sn_id:?} with {init_blocks:?}", Utc::now());
     let mut flow = hydroflow_syntax! {
         // each hb, should include all the blocks not-yet reported in the KN epoch
         // join w/ KN pool to determine to which KN the blocks should be reported
