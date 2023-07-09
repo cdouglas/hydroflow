@@ -90,14 +90,14 @@ async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
 }
 
 async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
-    let (_cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
+    let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
     let cli_a_id = Uuid::new_v4();
     let cli_b_id = Uuid::new_v4();
-    let canned_reqs = vec![
+    let _canned_reqs = vec![
         (
             CKRequest::Info {
                 id: ClientID { id: cli_a_id },
@@ -132,12 +132,8 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     let mut df = hydroflow_syntax! {
 
         // client
-        client_demux = //source_stream_serde(cl_inbound)
-            //-> map(Result::unwrap)
-        ////////
-            source_iter(canned_reqs)
-            -> persist()
-        /////////
+        client_demux = source_stream_serde(cl_inbound)
+            -> map(Result::unwrap)
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr), var_args!(info, errs)|
                     match cl_req {
@@ -156,7 +152,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         // segnode
         segnode_demux = source_stream_serde(sn_inbound)
             -> map(|m| m.unwrap())
-            -> inspect(|(m, a)| { println!("{}: KN: SN {:?} from {:?}", Utc::now(), m, a); })
+            //-> inspect(|(m, a)| { println!("{}: KN: SN {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
@@ -174,8 +170,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        //type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
-        //type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
         last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
         // uff.
             //-> inspect(|x: &(SegmentNodeID, (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
@@ -209,11 +203,11 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             })
             -> map(|((_, addr, key), lblocks)| (CKResponse::Info { key: key, blocks: lblocks }, addr))
             -> inspect(|x| println!("{}: -> LCM: {x:?}", Utc::now()))
-            -> null();
+            -> dest_sink_serde(cl_outbound);
 
         heartbeats
             -> map(|(id, _, addr, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(addr))))
-            -> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
+            //-> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
         // join all requests for blocks
@@ -221,7 +215,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
                     (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
-            -> inspect(|x: &(SegmentNodeID, Joe)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
+            //-> inspect(|x: &(SegmentNodeID, Joe)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
             -> [0]last_contact_map;
 
         heartbeats
@@ -277,7 +271,7 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
                     //acc.to_owned() // !#! not necessary for _keyed operators; not moved into the fold closure
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
-            -> inspect(|(m, a)| println!("{}: {} SN: HB {:?} to {:?}", Utc::now(), context.current_tick(), m, a))
+            //-> inspect(|(m, a)| println!("{}: {} SN: HB {:?} to {:?}", Utc::now(), context.current_tick(), m, a))
             -> dest_sink_serde(kn_outbound);
 
         kn_demux = source_stream_serde(kn_inbound)
@@ -290,7 +284,8 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
             );
 
         kn_demux[heartbeat]
-          -> for_each(|addr| println!("{}: SN: HB response from {:?}", Utc::now(), addr));
+          //-> inspect(|addr| println!("{}: SN: HB response from {:?}", Utc::now(), addr))
+          -> null();
 
         kn_demux[errs]
             -> null();
