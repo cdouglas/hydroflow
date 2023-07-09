@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
+use hydroflow::lattices::map_union::{MapUnion, MapUnionHashMap};
 use hydroflow::lattices::set_union::{SetUnionHashSet};
 use hydroflow::lattices::{DomPair, Max, Pair, Point};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
@@ -95,11 +96,19 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
     let canned_reqs = vec![
-        (CKRequest::Info {
-            id: ClientID { id: Uuid::new_v4() },
-            key: "dingo".to_owned(),
-        },
-        SocketAddr::from(([127, 0, 0, 1], 4344))
+        (
+            CKRequest::Info {
+                id: ClientID { id: Uuid::new_v4() },
+                key: "dingo".to_owned(),
+            },
+            SocketAddr::from(([127, 0, 0, 1], 4344))
+        ),
+        (
+            CKRequest::Info {
+                id: ClientID { id: Uuid::new_v4() },
+                key: "dingo".to_owned(),
+            },
+            SocketAddr::from(([127, 0, 0, 1], 4345))
         ),
     ];
 
@@ -198,14 +207,25 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> inspect(|x: &(SegmentNodeID, (Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>,
                                             DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
                             println!("{}: KN: LCM: {x:?}", Utc::now()))
+            // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
             -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
+            // XXX keys are scalars, not lattices
             -> map(|(_, (clikeyblock, hbts))| (clikeyblock.into_reveal(), hbts.into_reveal().1.val))
             -> flat_map(|((clikeyset, blockset), sn_addr)| clikeyset.into_reveal().into_iter().map(move |((id, addr), key)| (key, id, addr, blockset.clone(), sn_addr)))
             -> flat_map(|(key, cl_id, cl_addr, blockset, sn_addr)|
                     blockset.into_reveal().into_iter().map(move |block|
                         (key.clone(), (cl_id.clone(), cl_addr, block, sn_addr))))
+            -> map(|(key, (cl_id, cl_addr, block, sn_addr)): (String, (ClientID, SocketAddr, Block, SocketAddr))| 
+                    MapUnionHashMap::new_from([(key,
+                        MapUnionHashMap::new_from([(block, Pair::new_from(
+                            SetUnionHashSet::new_from([sn_addr]),
+                            SetUnionHashSet::new_from([(cl_id, cl_addr)]))
+                        )])
+                    )]))
+            -> lattice_fold::<'tick, MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>>()
             // FUCK. NO. Needs multiple folds???
-            -> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
+            //-> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
+            -> inspect(|x: &MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>|
                     println!("{}: LCM: {:?}", Utc::now(), x))
             //-> inspect(|x: &((SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>), SocketAddr)|
             //        println!("{}: LCM: {:?}", Utc::now(), x))
