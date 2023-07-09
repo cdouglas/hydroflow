@@ -166,39 +166,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        // LastContactMap: MapUnion<SegmentNodeID, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>>
-        //last_contact_map = lattice_join::<'tick, 'static, SetUnionHashSet<Block>, LastContactLattice>();
-        //last_contact_map = lattice_join::<'tick, 'static, Joe, DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>>();
-        //last_contact_map
-        //    -> inspect(|x| println!("{}: KN: DEBUG2: {x:?}", Utc::now()))
-        //    // uff.
-        //    //-> inspect(|x| println!("{}: DEBUG0: {:?}", Utc::now(), x))
-        //    -> map(|(_, ((clikey, block), last_contact)):
-        //                        (SegmentNodeID,
-        //                            (Joe,
-        //                             DomPair<Max<DateTime<Utc>>,SetUnionHashSet<SocketAddr>>)) | 
-        //        (block, (clikey, last_contact.into_reveal().1.into_reveal())))
-        //    //-> inspect(|x| println!("{}: DEBUG1: {:?}", Utc::now(), x))
-        //    -> flat_map(|(block, (clikey, addrset)):
-        //        (Block, (SetUnionHashSet<((ClientID, SocketAddr), String)>, HashSet<SocketAddr>)
-        //        )| addrset.into_iter().map(move |addr| (block.clone(), (addr, clikey.clone()))))
-        //    //-> inspect(|x| println!("{}: DEBUG2: {:?}", Utc::now(), x))
-        //    -> fold_keyed::<'tick>(|| vec![], |acc: &mut Vec<(SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)>, (block, addr): (SocketAddr, SetUnionHashSet<((ClientID, SocketAddr), String)>)| {
-        //        acc.push((block, addr));
-        //        //acc.to_owned() // why is this to_owned() necessary? // XXX it's not; fold_keyed doesn't retain this context
-        //    })
-        //    //-> map(|(b, s): (Block, SetUnionHashSet<SocketAddr>)| hydroflow::lattices::map_union::MapUnion::new(vec![(b, s)]))
-        //    //-> lattice_fold::<'tick, MapUnionHashMap<Block,SetUnionHashSet<SocketAddr>>>()
-        //    -> inspect(|x| println!("{}: LOOKUP_LAST_CONTACT_MAP: KN: {x:?}", Utc::now()))
-        //    -> null();
-        //    //-> dest_sink_serde(cl_outbound);
-
-        // LCM: (SegmentNodeID { id: 454147e2-ef1c-4a2f-bcbc-a9a774a4bb62 },
-        //    (Pair { a: SetUnion({((ClientID { id: 2ddb484b-4f32-4a26-acc2-fb5eca607a8a }, 127.0.0.1:4344), "dingo")}),
-        //            b: SetUnion({Block { pool: "2023874_0", id: 2348980 }, Block { pool: "2023874_0", id: 2348985 }})
-        //          },
-        //     DomPair { key: Max(2023-07-07T17:53:05.782872965Z), val: SetUnion({127.0.0.1:45052}) }))
-
         //type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
         //type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
         last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
@@ -206,7 +173,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             //-> filter(|(_, (_, hbts)): &(_, (_, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
             -> inspect(|x: &(SegmentNodeID, (Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>,
                                             DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
-                            println!("{}: KN: LCM: {x:?}", Utc::now()))
+                            println!("{}: -> LCM: {x:?}", Utc::now()))
             // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
             -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
             // XXX keys are scalars, not lattices
@@ -226,7 +193,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             // FUCK. NO. Needs multiple folds???
             //-> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
             -> inspect(|x: &MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>|
-                    println!("{}: LCM: {:?}", Utc::now(), x))
+                    println!("{}: <- LCM: {:?}", Utc::now(), x))
             //-> inspect(|x: &((SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>), SocketAddr)|
             //        println!("{}: LCM: {:?}", Utc::now(), x))
             -> null();
