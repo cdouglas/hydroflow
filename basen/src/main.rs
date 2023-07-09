@@ -16,9 +16,7 @@ use crate::client::run_client;
 
 mod client;
 mod helpers;
-mod keynode;
 mod protocol;
-mod segnode;
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
@@ -121,13 +119,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         ),
     ];
 
-    // LastContactMap: HashMap<SegmentNodeID, (SocketAddr, Time)>
     let init_keys = init_keys.to_vec();
-
-    // changed to a regular join
-    //type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
-    type Joe = MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>;
-    type Chris = DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>;
 
     let mut df = hydroflow_syntax! {
 
@@ -144,8 +136,6 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
 
         client_demux[info]
             -> [0]key_map;
-            //-> map(|(_cl_req, addr)| (CKResponse::Info { blocks: vec![] }, addr))
-            //-> dest_sink_serde(cl_outbound);
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
 
@@ -170,13 +160,17 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
-        // uff.
-            //-> inspect(|x: &(SegmentNodeID, (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
-            -> inspect(|x: &(SegmentNodeID, (Joe, DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
+        last_contact_map = lattice_join::<'tick, 'static,
+                MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
+                DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>>()
+            -> inspect(|x: &(SegmentNodeID,
+                (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
+                 DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
                             println!("{}: <- LCM: {x:?}", Utc::now()))
-//            // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
+            // XXX want this filter to yield... a MIN/BOT value s.t. if no valid replicas, will merge into an error value?
+            // remove segment nodes that haven't sent a heartbeat in the last 10 seconds
             -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
+            // extract the service address from those nodes
             -> flat_map(|(_, (block_clikey, hbts))| block_clikey.into_reveal().into_iter().map(move
                 |(block, clikeys)| MapUnionHashMap::new_from([(block,
                     Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
@@ -215,7 +209,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
                     (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
-            //-> inspect(|x: &(SegmentNodeID, Joe)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
+            //-> inspect(|x: &(SegmentNodeID, MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
             -> [0]last_contact_map;
 
         heartbeats
@@ -246,19 +240,20 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
     // clone blocks
     let init_blocks = init_blocks.to_vec();
 
-    //let sn_id = Uuid::new_v4(); //Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap();
     let sn_id = SegmentNodeID { id: sn_uuid }; // Uuid::new_v4(), };
     let kn_addr: SocketAddr = ipv4_resolve(keynode_server_addr).unwrap();
+    let cl_sn_addr: SocketAddr = ipv4_resolve("127.0.0.1:0").unwrap(); // random service port
 
     let hb_interval_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));
+    let (_cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(cl_sn_addr).await;
 
-    println!("{}: SN: Starting {sn_id:?} with {init_blocks:?}", Utc::now());
+    println!("{}: SN: Starting {sn_id:?}@{cl_addr:?} with {init_blocks:?}", Utc::now());
     let mut flow = hydroflow_syntax! {
         // each hb, should include all the blocks not-yet reported in the KN epoch
         // join w/ KN pool to determine to which KN the blocks should be reported
 
         hb_timer = source_stream(hb_interval_stream)
-            -> map(|_| (kn_addr, ()))
+            -> map(|_| (kn_addr, ())) // wtf, no. Wrong address.
             -> [0]hb_report;
         source_iter(init_blocks)
             -> map(|block| (kn_addr, block))
@@ -268,7 +263,6 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
             -> fold_keyed::<'tick>(Vec::new,
                 |acc: &mut Vec<Block>, (_, blk): ((), Block)| {
                     acc.push(blk);
-                    //acc.to_owned() // !#! not necessary for _keyed operators; not moved into the fold closure
                 })
             -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
             //-> inspect(|(m, a)| println!("{}: {} SN: HB {:?} to {:?}", Utc::now(), context.current_tick(), m, a))
@@ -289,61 +283,7 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
 
         kn_demux[errs]
             -> null();
-
-
-
-
-        // // Define shared inbound and outbound channels
-        // inbound_chan = source_stream_serde(cl_inbound)
-        //     -> map(|udp_msg| udp_msg.unwrap()) /* -> tee() */; // commented out since we only use this once in the client template
-
-        // // Print all messages for debugging purposes
-        // inbound_chan[1]
-        //     -> for_each(|(m, a): (SKResponse, SocketAddr)| println!("{}: Got {:?} from {:?}", Utc::now(), m, a));
-
-        //// take stdin and send to server as an Message::Echo
-        //source_stdin() -> map(|l| (Message::Echo{ payload: l.unwrap(), ts: Utc::now(), }, server_addr) )
-        //    -> outbound_chan;
     };
 
     flow.run_async().await;
 }
-
-// for regular join:
-//     insert: ("a", 0) - ("a", 1)
-//     insert: ("a", 0) - ("a", 2)
-
-//     lhs: ("a", [0])
-//     rhs: ("a", [1, 2])
-
-//     output:
-//     ("a", (0, 1))
-//     ("a", (0, 2))
-
-// for multiset_join
-//     insert: ("a", 0) - ("a", 1)
-//     insert: ("a", 0) - ("a", 2)
-
-//     lhs: ("a", [0, 0])
-//     rhs: ("a", [1, 2])
-
-//     output:
-//     ("a", (0, 1))
-//     ("a", (0, 2))
-//     ("a", (0, 1))
-//     ("a", (0, 2))
-
-// for lattice_join:
-//     insert: ("a", SetUnion([0])) -> LHS
-//     insert: ("a", SetUnion([3])) -> LHS
-//     insert: ("a", Min(0)) -> RHS
-//     insert: ("a", Max(2)) -> RHS
-
-//     lhs: ("a", SetUnion([0, 3]))
-//     rhs: ("a", Max(2))
-
-//     output:
-//     ("a", (SetUnion([0, 3]), Max(2))) -> flat_map() ->
-
-//     ("a", (0, Max(2)))
-//     ("a", (3, Max(2)))
