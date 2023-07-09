@@ -126,8 +126,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
 
     // changed to a regular join
     //type LastContactLattice = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
-    type BlockSetLattice = SetUnionHashSet<SegmentNodeID>;
-    type Joe = Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>;
+    type Joe = MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>;
     type Chris = DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>;
 
     let mut df = hydroflow_syntax! {
@@ -179,31 +178,37 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
         //type Chris = DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>;
         last_contact_map = lattice_join::<'tick, 'static, Joe, Chris>()
         // uff.
-            //-> filter(|(_, (_, hbts)): &(_, (_, DomPair<Max<DateTime<Utc>>, SetUnionHashSet<SocketAddr>>))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
-            -> inspect(|x: &(SegmentNodeID, (Pair<SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>>,
-                                            DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
-                            println!("{}: -> LCM: {x:?}", Utc::now()))
-            // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
+            //-> inspect(|x: &(SegmentNodeID, (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
+            -> inspect(|x: &(SegmentNodeID, (Joe, DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
+                            println!("{}: <- LCM: {x:?}", Utc::now()))
+//            // want this filter to yield... a MIN/BOT value that- if block is inaccessible- will merge into an error value?
             -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
-            -> map(|(_, (clikeyblock, hbts))| (clikeyblock.into_reveal(), hbts.into_reveal().1.val))
-            // XXX instead of un-latticing these and re-lattice-folding them, is there an opportunity to pass through?
-            -> flat_map(|((clikeyset, blockset), sn_addr)| clikeyset.into_reveal().into_iter().map(move |((id, addr), key)| (key, id, addr, blockset.clone(), sn_addr)))
-            -> flat_map(|(key, cl_id, cl_addr, blockset, sn_addr)|
-                    blockset.into_reveal().into_iter().map(move |block|
-                        (key.clone(), (cl_id.clone(), cl_addr, block, sn_addr))))
-            -> map(|(key, (cl_id, cl_addr, block, sn_addr)): (String, (ClientID, SocketAddr, Block, SocketAddr))| 
-                    MapUnionHashMap::new_from([(key,
-                        MapUnionHashMap::new_from([(block, Pair::new_from(
-                            SetUnionHashSet::new_from([sn_addr]),
-                            SetUnionHashSet::new_from([(cl_id, cl_addr)]))
-                        )])
-                    )]))
-            -> lattice_fold::<'tick, MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>>()
-            //-> inspect(|x: &(String, (ClientID, SocketAddr, Block, SocketAddr))|
-            -> inspect(|x: &MapUnionHashMap<String, MapUnionHashMap<Block, Pair<SetUnionHashSet<SocketAddr>, SetUnionHashSet<(ClientID, SocketAddr)>>>>|
-                    println!("{}: <- LCM: {:?}", Utc::now(), x))
-            //-> inspect(|x: &((SetUnionHashSet<((ClientID, SocketAddr), String)>, SetUnionHashSet<Block>), SocketAddr)|
-            //        println!("{}: LCM: {:?}", Utc::now(), x))
+            -> flat_map(|(_, (block_clikey, hbts))| block_clikey.into_reveal().into_iter().map(move
+                |(block, clikeys)| MapUnionHashMap::new_from([(block,
+                    Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
+                        ::new_from(clikeys, SetUnionHashSet::new_from([hbts.into_reveal().1.val])))])))
+            -> lattice_fold::<'tick,
+                MapUnionHashMap<Block,
+                                Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
+                                     SetUnionHashSet<SocketAddr>>>>()
+            // unpack map into tuples
+            -> flat_map(|block_keycli_addr| block_keycli_addr.into_reveal().into_iter().map(move
+                |(block, req_sn_addrs)| (block, req_sn_addrs.into_reveal())))
+            -> flat_map(move |(block, (reqs, sn_addrs)): (Block, (MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
+                                                             SetUnionHashSet<SocketAddr>))|
+                    reqs.into_reveal().into_iter().map(move |(key, cliset)|
+                    (key,
+                    LocatedBlock {
+                        block: block.clone(),
+                        locations: sn_addrs.clone().into_reveal().into_iter().collect::<Vec<_>>(), // XXX clone() avoidable?
+                    },
+                    cliset)))
+            -> flat_map(move |(key, lblock, cliset)| cliset.into_reveal().into_iter().map(move |(id, addr)| ((id, addr, key.clone()), lblock.clone())))
+            -> fold_keyed::<'tick>(Vec::new, |lblocks: &mut Vec<LocatedBlock>, lblock| {
+                lblocks.push(lblock);
+            })
+            -> map(|((_, addr, key), lblocks)| (CKResponse::Info { key: key, blocks: lblocks }, addr))
+            -> inspect(|x| println!("{}: -> LCM: {x:?}", Utc::now()))
             -> null();
 
         heartbeats
@@ -211,29 +216,22 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
-        block_map = lattice_join::<'tick, 'static, SetUnionHashSet<((ClientID, SocketAddr), String)>, BlockSetLattice>()
+        // join all requests for blocks
+        block_map = lattice_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
-            // XXX NO! A lattice join over this type will collapse the mapping of requests to blocks, yielding
-            //         Pair<{clients, keys}, {blocks}>, which loses the mapping requests to blocks
-            -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn| (sn, Pair::new_from(clikeyset.clone(), SetUnionHashSet::new_from([block.clone()])))))
-            -> inspect(|x| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
-            //// We think the block is unique, but let's check
-            //-> map(|(key, val)| {
-            //    let b: &SetUnionHashSet<Block> = val.as_reveal_ref().1;
-            //    let b2 = b.as_reveal_ref();
-            //    if b2.len() > 1 {
-            //        panic!()
-            //    }
-            //    (key, val)
-            //  })
+            -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
+                    (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
+            -> inspect(|x: &(SegmentNodeID, Joe)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
             -> [0]last_contact_map;
 
         heartbeats
             -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
 
-        key_map = join::<'tick, 'static>() // where to stash the client context?
-            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([(cli.clone(), key.clone())]))))
+        // join (key, client) requests with existing key map (key, blocks)
+        key_map = join::<'tick, 'static>()
+            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
+                |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
             -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
             -> [0]block_map;
 

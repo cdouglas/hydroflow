@@ -77,7 +77,7 @@ pub enum CKResponse {
     Create   { klease: KeyLease },
     AddBlock { blease: BlockLease },
     Open     { blocks: Vec<Block> },
-    Info     { blocks: Vec<Block> },
+    Info     { key: String, blocks: Vec<LocatedBlock> }, // break into multiple responses, to avoid blocking merge?
     Close    { },
 }
 
