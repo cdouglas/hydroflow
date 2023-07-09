@@ -100,8 +100,8 @@ pub enum CSResponse {
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub enum SKRequest {
-    Register  { id: SegmentNodeID, cli_addr: SocketAddr },
-    Heartbeat { id: SegmentNodeID, blocks: Vec<Block> },
+    Register  { id: SegmentNodeID, svc_addr: SocketAddr },
+    Heartbeat { id: SegmentNodeID, svc_addr: SocketAddr, blocks: Vec<Block> },
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]

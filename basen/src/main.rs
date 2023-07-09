@@ -146,7 +146,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
-                        SKRequest::Heartbeat { id, blocks, } => heartbeat.give((id, blocks, addr, Max::new(Utc::now()))),
+                        SKRequest::Heartbeat { id, svc_addr, blocks, } => heartbeat.give((id, svc_addr, blocks, addr, Max::new(Utc::now()))),
                         //_ => errs.give((sn_req, addr)),
                         _ => errs.give((sn_req, addr)),
                     }
@@ -157,7 +157,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
 
         // Heartbeat response
         heartbeats
-            -> map(|(_, _, addr, _)| (SKResponse::Heartbeat { }, addr))
+            -> map(|(_, _, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
         last_contact_map = lattice_join::<'tick, 'static,
@@ -200,7 +200,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> dest_sink_serde(cl_outbound);
 
         heartbeats
-            -> map(|(id, _, addr, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(addr))))
+            -> map(|(id, svc_addr, _, _, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(svc_addr))))
             //-> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
@@ -213,7 +213,7 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
             -> [0]last_contact_map;
 
         heartbeats
-            -> flat_map(|(id, blocks, _, _): (SegmentNodeID, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
+            -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, SocketAddr, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
 
         // join (key, client) requests with existing key map (key, blocks)
@@ -264,7 +264,7 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
                 |acc: &mut Vec<Block>, (_, blk): ((), Block)| {
                     acc.push(blk);
                 })
-            -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), blocks: blk }, addr))
+            -> map(|(addr, blk): (SocketAddr, Vec<Block>)| (SKRequest::Heartbeat {id: sn_id.clone(), svc_addr: cl_addr, blocks: blk }, addr))
             //-> inspect(|(m, a)| println!("{}: {} SN: HB {:?} to {:?}", Utc::now(), context.current_tick(), m, a))
             -> dest_sink_serde(kn_outbound);
 
