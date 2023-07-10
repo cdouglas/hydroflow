@@ -31,7 +31,7 @@ pub(crate) async fn run_client(keynode_client_addr: SocketAddr, opts: Opts) {
             -> outbound_chan;
     };
 
-    if let Some(graph) = opts.graph {
+    if let Some(graph) = &opts.graph {
         print_graph(&flow, graph);
     }
 

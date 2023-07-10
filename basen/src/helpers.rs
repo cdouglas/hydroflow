@@ -2,7 +2,7 @@ use crate::GraphType;
 use hydroflow::scheduled::graph::Hydroflow;
 
 #[allow(dead_code)]
-pub fn print_graph(flow: &Hydroflow, graph: GraphType) {
+pub fn print_graph(flow: &Hydroflow, graph: &GraphType) {
     let meta_graph = flow
         .meta_graph()
         .expect("No graph found, maybe failed to parse.");

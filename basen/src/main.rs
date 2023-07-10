@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::protocol::*;
 use crate::client::run_client;
+use crate::helpers::print_graph;
 
 mod client;
 mod helpers;
@@ -62,7 +63,7 @@ async fn main() {
     }
 }
 
-async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
+async fn run_servers(keynode_cl_addr: SocketAddr, opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
 
     let canned_keys = vec![
@@ -81,13 +82,13 @@ async fn run_servers(keynode_cl_addr: SocketAddr, _opts: Opts) {
         Block { pool: "x".to_owned(), id: 400u64 },
     ];
     futures::join!(
-        segment_node(KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
-        segment_node(KEYNODE_SN_ADDR, Uuid::parse_str("454147e2-ef1c-4a2f-bcbc-a9a774a4bb62").unwrap(), &canned_blocks[..]),
-        key_node(KEYNODE_SN_ADDR, keynode_cl_addr, &canned_keys[..]),
+        segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
+        segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
+        key_node(&opts, KEYNODE_SN_ADDR, keynode_cl_addr, &canned_keys[..]),
     );
 }
 
-async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
+async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
@@ -231,16 +232,21 @@ async fn key_node(keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr
           -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
     };
 
+    //df.meta_graph().unwrap().write_mermaid(std::fs::File::create("lattice.md")).unwrap();
+    if let Some(graph) = &opts.graph {
+        print_graph(&df, graph);
+    }
+
     df.run_async().await.unwrap();
 }
 
-async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blocks: &[Block]) {
+async fn segment_node(opts: &Opts, keynode_server_addr: &'static str, sn_uuid: Uuid, init_blocks: &[Block]) {
     let (kn_outbound, kn_inbound) = connect_tcp_bytes();
 
     // clone blocks
     let init_blocks = init_blocks.to_vec();
 
-    let sn_id = SegmentNodeID { id: sn_uuid }; // Uuid::new_v4(), };
+    let sn_id = SegmentNodeID { id: sn_uuid }; // Uuid::new_v4(), ;
     let kn_addr: SocketAddr = ipv4_resolve(keynode_server_addr).unwrap();
     let cl_sn_addr: SocketAddr = ipv4_resolve("127.0.0.1:0").unwrap(); // random service port
 
@@ -248,7 +254,7 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
     let (_cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(cl_sn_addr).await;
 
     println!("{}: SN: Starting {sn_id:?}@{cl_addr:?} with {init_blocks:?}", Utc::now());
-    let mut flow = hydroflow_syntax! {
+    let mut df = hydroflow_syntax! {
         // each hb, should include all the blocks not-yet reported in the KN epoch
         // join w/ KN pool to determine to which KN the blocks should be reported
 
@@ -285,5 +291,9 @@ async fn segment_node(keynode_server_addr: &'static str, sn_uuid: Uuid, init_blo
             -> null();
     };
 
-    flow.run_async().await;
+    if let Some(graph) = &opts.graph {
+        print_graph(&df, graph);
+    }
+
+    df.run_async().await;
 }
