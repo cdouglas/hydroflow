@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use clap::{Parser, ValueEnum};
 use hydroflow::lattices::map_union::MapUnionHashMap;
 use hydroflow::lattices::set_union::SetUnionHashSet;
 use hydroflow::lattices::{DomPair, Max, Pair, Point};
@@ -12,86 +11,11 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::protocol::*;
-use crate::client::run_client;
 use crate::helpers::print_graph;
 
-mod client;
-mod helpers;
-mod protocol;
-mod latless;
+use crate::Opts;
 
-#[derive(Clone, ValueEnum, Debug)]
-enum Role {
-    Servers, // run all servers in one process, for now
-    Client,
-}
-
-#[derive(Clone, ValueEnum, Debug)]
-pub enum GraphType {
-    Mermaid,
-    Dot,
-}
-
-#[derive(Parser, Debug)]
-pub struct Opts {
-    #[clap(value_enum, long)]
-    role: Role,
-    // #[clap(long)]
-    #[clap(long, value_parser = ipv4_resolve)]
-    addr: Option<SocketAddr>,
-    // #[clap(long)]
-    #[clap(long, value_parser = ipv4_resolve)]
-    server_addr: Option<SocketAddr>,
-    #[clap(value_enum, long)]
-    graph: Option<GraphType>,
-}
-
-#[hydroflow::main]
-async fn main() {
-    let opts = Opts::parse();
-    // if no addr was provided, we ask the OS to assign a local port by passing in "localhost:0"
-    let addr = opts
-        .addr
-        .unwrap_or_else(|| ipv4_resolve("localhost:0").unwrap());
-
-    match opts.role {
-        Role::Servers => {
-            run_servers(addr, opts).await;
-        }
-        Role::Client => {
-            run_client(addr, opts).await;
-        }
-    }
-}
-
-async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
-    const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
-
-    let canned_keys = vec![
-        ("dingo".to_owned(), vec![
-            Block { pool: "x".to_owned(), id: 200u64 },
-            Block { pool: "x".to_owned(), id: 300u64 },
-        ]),
-        ("yak".to_owned(), vec![
-            Block { pool: "x".to_owned(), id: 400u64 }
-        ]),
-    ];
-
-    let canned_blocks = vec![
-        Block { pool: "x".to_owned(), id: 200u64 },
-        Block { pool: "x".to_owned(), id: 300u64 },
-        Block { pool: "x".to_owned(), id: 400u64 },
-    ];
-    futures::join!(
-        // super-lazy switch, here...
-        crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
-        crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
-        crate::latless::key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
-    );
-}
-
-#[allow(dead_code)]
-async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
+pub async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
@@ -227,8 +151,9 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
             -> [0]block_map;
 
+        // flatten into relation
         source_iter(init_keys)
-            //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
+            //-> flat_map(|(key, blocks)| blocks.into_iter().map(move |block| (key, block)))
             -> [1]key_map;
 
         segnode_demux[errs]
@@ -243,8 +168,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
     df.run_async().await.unwrap();
 }
 
-#[allow(dead_code)]
-async fn segment_node(opts: &Opts, keynode_server_addr: &'static str, sn_uuid: Uuid, init_blocks: &[Block]) {
+pub async fn segment_node(opts: &Opts, keynode_server_addr: &'static str, sn_uuid: Uuid, init_blocks: &[Block]) {
     let (kn_outbound, kn_inbound) = connect_tcp_bytes();
 
     // clone blocks
