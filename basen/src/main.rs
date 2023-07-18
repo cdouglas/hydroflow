@@ -63,7 +63,7 @@ async fn main() {
     }
 }
 
-async fn run_servers(keynode_cl_addr: SocketAddr, opts: Opts) {
+async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
 
     let canned_keys = vec![
@@ -84,7 +84,7 @@ async fn run_servers(keynode_cl_addr: SocketAddr, opts: Opts) {
     futures::join!(
         segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
         segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
-        key_node(&opts, KEYNODE_SN_ADDR, keynode_cl_addr, &canned_keys[..]),
+        key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
     );
 }
 
