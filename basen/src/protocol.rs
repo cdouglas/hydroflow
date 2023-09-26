@@ -52,6 +52,15 @@ pub struct ClientID {
     // add metadata for KN to determine location for replica ordering
 }
 
+// internal, clean up some nested tuples by making this a join later
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct ClientInfo {
+    pub id: ClientID,
+    pub addr: SocketAddr,
+}
+
+
 #[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct SegmentNodeID {

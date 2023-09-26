@@ -1,9 +1,6 @@
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use hydroflow::lattices::map_union::MapUnionHashMap;
-use hydroflow::lattices::set_union::SetUnionHashSet;
-use hydroflow::lattices::{DomPair, Max, Pair, Point};
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
 use tokio::time;
@@ -74,7 +71,7 @@ pub async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
-                        SKRequest::Heartbeat { id, svc_addr, blocks, } => heartbeat.give((id, svc_addr, blocks, addr, Max::new(Utc::now()))),
+                        SKRequest::Heartbeat { id, svc_addr, blocks, } => heartbeat.give((id, svc_addr, blocks, addr, Utc::now())),
                         //_ => errs.give((sn_req, addr)),
                         _ => errs.give((sn_req, addr)),
                     }
@@ -88,72 +85,91 @@ pub async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client
             -> map(|(_, _, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        last_contact_map = lattice_join::<'tick, 'static,
-                MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
-                DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>>()
-            -> inspect(|x: &(SegmentNodeID,
-                (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
-                 DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
-                            println!("{}: <- LCM: {x:?}", Utc::now()))
-            // XXX want this filter to yield... a MIN/BOT value s.t. if no valid replicas, will merge into an error value?
-            // remove segment nodes that haven't sent a heartbeat in the last 10 seconds
-            -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
-            // extract the service address from those nodes
-            -> flat_map(|(_, (block_clikey, hbts))| block_clikey.into_reveal().into_iter().map(move
-                |(block, clikeys)| MapUnionHashMap::new_from([(block,
-                    Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
-                        ::new_from(clikeys, SetUnionHashSet::new_from([hbts.into_reveal().1.val])))])))
-            -> lattice_fold::<'tick,
-                MapUnionHashMap<Block,
-                                Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-                                     SetUnionHashSet<SocketAddr>>>>()
-            // unpack map into tuples
-            -> flat_map(|block_keycli_addr| block_keycli_addr.into_reveal().into_iter().map(move
-                |(block, req_sn_addrs)| (block, req_sn_addrs.into_reveal())))
-            -> flat_map(move |(block, (reqs, sn_addrs)): (Block, (MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-                                                             SetUnionHashSet<SocketAddr>))|
-                    reqs.into_reveal().into_iter().map(move |(key, cliset)|
-                    (key,
-                    LocatedBlock {
-                        block: block.clone(),
-                        locations: sn_addrs.clone().into_reveal().into_iter().collect::<Vec<_>>(), // XXX clone() avoidable?
-                    },
-                    cliset)))
-            -> flat_map(move |(key, lblock, cliset)| cliset.into_reveal().into_iter().map(move |(id, addr)| ((id, addr, key.clone()), lblock.clone())))
-            -> fold_keyed::<'tick>(Vec::new, |lblocks: &mut Vec<LocatedBlock>, lblock| {
-                lblocks.push(lblock);
-            })
-            -> map(|((_, addr, key), lblocks)| (CKResponse::Info { key: key, blocks: lblocks }, addr))
-            -> inspect(|x| println!("{}: -> LCM: {x:?}", Utc::now()))
-            -> dest_sink_serde(cl_outbound);
+        last_contact_map = join::<'tick, 'static>()
+            -> inspect(|x: &(SegmentNodeID, ((Block, String, ClientInfo), (DateTime<Utc>, SocketAddr)))| println!("{}: KN: LCM: {x:?} -> ", Utc::now()))
+            -> filter(|(_, (_, (last_contact, _)))| Utc::now() - *last_contact < chrono::Duration::seconds(10))
+            // XXX need to clone the current value in reduce_keyed; can this select the max by reference?
+            -> reduce_keyed(
+                |cur: &mut ((Block, String, ClientInfo), (DateTime<Utc>, SocketAddr)),
+                 val: ((Block, String, ClientInfo), (DateTime<Utc>, SocketAddr))|
+                    *cur = std::cmp::max_by(cur.clone(), val, |c, v| c.1.0.cmp(&v.1.0)))
+            // remove unnecessary duplication
+            -> map(|(_, ((block, key, cli), (_, addr)))| ((key, cli, block.clone()), LocatedBlock { block: block.clone(), locations: vec![addr] }))
+            -> reduce_keyed(|cur: &mut LocatedBlock, val: LocatedBlock| cur.locations.extend(val.locations))
+            -> inspect(|x: &((String, ClientInfo, Block), LocatedBlock)| println!("{}: KN: LCM: {x:?} ******* ", Utc::now()))
+            -> null();
+
+        //last_contact_map = lattice_join::<'tick, 'static,
+        //        MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
+        //        DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>>()
+        //    -> inspect(|x: &(SegmentNodeID,
+        //        (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
+        //         DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
+        //                    println!("{}: <- LCM: {x:?}", Utc::now()))
+        //    // XXX want this filter to yield... a MIN/BOT value s.t. if no valid replicas, will merge into an error value?
+        //    // remove segment nodes that haven't sent a heartbeat in the last 10 seconds
+        //    -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
+        //    // extract the service address from those nodes
+        //    -> flat_map(|(_, (block_clikey, hbts))| block_clikey.into_reveal().into_iter().map(move
+        //        |(block, clikeys)| MapUnionHashMap::new_from([(block,
+        //            Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
+        //                ::new_from(clikeys, SetUnionHashSet::new_from([hbts.into_reveal().1.val])))])))
+        //    -> lattice_fold::<'tick,
+        //        MapUnionHashMap<Block,
+        //                        Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
+        //                             SetUnionHashSet<SocketAddr>>>>()
+        //    // unpack map into tuples
+        //    -> flat_map(|block_keycli_addr| block_keycli_addr.into_reveal().into_iter().map(move
+        //        |(block, req_sn_addrs)| (block, req_sn_addrs.into_reveal())))
+        //    -> flat_map(move |(block, (reqs, sn_addrs)): (Block, (MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
+        //                                                     SetUnionHashSet<SocketAddr>))|
+        //            reqs.into_reveal().into_iter().map(move |(key, cliset)|
+        //            (key,
+        //            LocatedBlock {
+        //                block: block.clone(),
+        //                locations: sn_addrs.clone().into_reveal().into_iter().collect::<Vec<_>>(), // XXX clone() avoidable?
+        //            },
+        //            cliset)))
+        //    -> flat_map(move |(key, lblock, cliset)| cliset.into_reveal().into_iter().map(move |(id, addr)| ((id, addr, key.clone()), lblock.clone())))
+        //    -> fold_keyed::<'tick>(Vec::new, |lblocks: &mut Vec<LocatedBlock>, lblock| {
+        //        lblocks.push(lblock);
+        //    })
+        //    -> map(|((_, addr, key), lblocks)| (CKResponse::Info { key: key, blocks: lblocks }, addr))
+        //    -> inspect(|x| println!("{}: -> LCM: {x:?}", Utc::now()))
+        //    -> dest_sink_serde(cl_outbound);
 
         heartbeats
-            -> map(|(id, svc_addr, _, _, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(svc_addr))))
-            //-> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
+            -> map(|(id, svc_addr, _, _, last_contact)| (id, (last_contact, svc_addr)))
+            -> inspect(|x: &(SegmentNodeID, (DateTime<Utc>, SocketAddr))| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
-        // join all requests for blocks
-        block_map = lattice_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
-            // can we replace `clone()` with `to_owned()`? The compiler thinks so!
-            -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
-                    (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
-            //-> inspect(|x: &(SegmentNodeID, MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
+        //// join all requests for blocks
+        //block_map = lattice_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
+        //    // can we replace `clone()` with `to_owned()`? The compiler thinks so!
+        //    -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
+        //            (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
+        //    //-> inspect(|x: &(SegmentNodeID, MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
+        //    -> [0]last_contact_map;
+
+        block_map = join::<'tick, 'static>()
+            -> inspect(|x: &(Block, ((String, ClientInfo), SegmentNodeID))| println!("{}: KN: LOOKUP_BLOCK_MAP: {x:?}", Utc::now()))
+            -> map(|(block, ((key, cli), sn_id))| (sn_id, (block, key, cli)))
             -> [0]last_contact_map;
 
         heartbeats
-            -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, SocketAddr, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
+            -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, _, Vec<Block>, _, _)| blocks.into_iter().map(move |block| (block, id.clone())))
+            // add filter for blocks here?
             -> [1]block_map;
 
         // join (key, client) requests with existing key map (key, blocks)
         key_map = join::<'tick, 'static>()
-            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
-                |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
-            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
+            -> inspect(|x: &(String, ((ClientID, SocketAddr), Block))| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
+            -> map(|(key, ((id, addr), block))| (block, (key, ClientInfo { id, addr })))
             -> [0]block_map;
 
         // flatten into relation
         source_iter(init_keys)
-            //-> flat_map(|(key, blocks)| blocks.into_iter().map(move |block| (key, block)))
+            -> flat_map(|(key, blocks)| blocks.into_iter().map(move |block| (key.clone(), block)))
             -> [1]key_map;
 
         segnode_demux[errs]
