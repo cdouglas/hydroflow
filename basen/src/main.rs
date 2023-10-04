@@ -164,7 +164,8 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> map(|(_, _, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
 
-        last_contact_map = lattice_join::<'tick, 'static,
+        // XXX note equivalent t lattice_fold() -> join() on both sides, but this is more efficient
+        last_contact_map = _lattice_join_fused_join::<'tick, 'static,
                 MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
                 DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>>()
             -> inspect(|x: &(SegmentNodeID,
@@ -179,10 +180,14 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
                 |(block, clikeys)| MapUnionHashMap::new_from([(block,
                     Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
                         ::new_from(clikeys, SetUnionHashSet::new_from([hbts.into_reveal().1.val])))])))
-            -> lattice_fold::<'tick,
-                MapUnionHashMap<Block,
+            //-> lattice_fold::<'tick,
+            //    MapUnionHashMap<Block,
+            //                    Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
+            //                         SetUnionHashSet<SocketAddr>>>>()
+            -> lattice_fold::<'tick>(
+                MapUnionHashMap::<Block,
                                 Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-                                     SetUnionHashSet<SocketAddr>>>>()
+                                     SetUnionHashSet<SocketAddr>>>::default())
             // unpack map into tuples
             -> flat_map(|block_keycli_addr| block_keycli_addr.into_reveal().into_iter().map(move
                 |(block, req_sn_addrs)| (block, req_sn_addrs.into_reveal())))
@@ -209,7 +214,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> [1]last_contact_map;
 
         // join all requests for blocks
-        block_map = lattice_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
+        block_map = _lattice_join_fused_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
                     (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))

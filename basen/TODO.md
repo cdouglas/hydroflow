@@ -1,3 +1,13 @@
+# 2023-09-29
+
+## WTF was I doing?
+
+
+
+## WTF am I doing?
+
+
+
 # 2023-07-04
 
 Achieve for today: Client lookup and request to segment node
