@@ -84,12 +84,12 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
     ];
     futures::join!(
         // super-lazy switch, here...
-        segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
-        segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
-        key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
-        //crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
-        //crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
-        //crate::latless::key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
+        //segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
+        //segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
+        //key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
+        crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[0..1]),
+        crate::latless::segment_node(&opts, KEYNODE_SN_ADDR, Uuid::new_v4(), &canned_blocks[..]),
+        crate::latless::key_node(&opts, KEYNODE_SN_ADDR, keynode_client_addr, &canned_keys[..]),
     );
 }
 

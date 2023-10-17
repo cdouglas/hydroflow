@@ -1,12 +1,22 @@
+# 2023-10-02
+
+
 # 2023-09-29
 
 ## WTF was I doing?
 
+Rewrite implementation of the heartbeat/liveness handling (with assoc default keys) without using lattice types
+
+latless.rs
 
 
 ## WTF am I doing?
 
-
+✓ fix the lattice implmementation
+○ finish the non-lattice implementation
+○ chain replication
+  ○ recv list of nodes (whatever, just return everything for now)
+  ○ 
 
 # 2023-07-04
 
