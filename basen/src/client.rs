@@ -20,9 +20,10 @@ pub(crate) async fn run_client(keynode_client_addr: SocketAddr, opts: Opts) {
 
         kn_inbound = source_stream_serde(inbound)
             -> map(|udp_msg| udp_msg.unwrap())
-            -> demux(|(kn_resp, addr), var_args!(info, errs)|
+            -> demux(|(kn_resp, addr), var_args!(create, info, errs)|
                 match kn_resp {
                     CKResponse::Info{ key, blocks } => info.give((key, blocks, addr)),
+                    CKResponse::Create { klease } => create.give((klease, addr)),
                     _ => errs.give((kn_resp, addr)),
                 }
             );
@@ -32,14 +33,39 @@ pub(crate) async fn run_client(keynode_client_addr: SocketAddr, opts: Opts) {
             -> flat_map(|(_, b, _): (String, Vec<LocatedBlock>, SocketAddr)| b.into_iter().map(move |lb| lb))
             -> for_each(|b: LocatedBlock| println!("{}:      {:?} {:?}", Utc::now(), b.block.id, b.locations));
 
+        kn_inbound[create]
+            -> for_each(|(kl, a): (KeyLease, SocketAddr)| println!("{}: {:?} CREATE {:?}", Utc::now(), a, kl));
+
         kn_inbound[errs]
             -> for_each(|(m, a): (CKResponse, SocketAddr)| println!("{}: {:?} ERR {:?}", Utc::now(), a, m));
             
 
-        // every line a request to open(line). FFS
-        source_stdin()
-            -> map(|key| (CKRequest::Info{ id: client_id.clone(), key: key.unwrap() }, keynode_client_addr) )
+        // TODO awful.
+        repl = source_stdin()
+            -> map(Result::unwrap)
+            -> map(move |line| line.trim().split(' ').map(str::to_owned).collect())
+            // filter out empty lines?
+            -> demux(|argv: Vec<String>, var_args!(create, info, errs)|
+                match argv[0].to_lowercase().as_str() {
+                    "create" => create.give(argv[1].to_owned()),
+                    "info" => info.give(argv[1].to_owned()),
+                    _ => errs.give(()),
+                }
+            );
+
+        repl[create]
+            -> null();
+
+        repl[info]
+            //-> map(|argv: &[&str]| (CKRequest::Info{ id: client_id.clone(), key: argv[1].to_string() }, keynode_client_addr) )
+            -> map(|key: String| (CKRequest::Info{ id: client_id.clone(), key }, keynode_client_addr) )
             -> outbound_chan;
+
+        repl[errs]
+            -> for_each(|_| println!("{}: ERR", Utc::now()));
+
+            //-> map(|key| (CKRequest::Info{ id: client_id.clone(), key: key.unwrap() }, keynode_client_addr) )
+            //-> outbound_chan;
     };
 
     if let Some(graph) = &opts.graph {
