@@ -32,6 +32,14 @@ pub enum GraphType {
     Dot,
 }
 
+pub struct Cmd {
+    req: CKRequest,
+    addr: SocketAddr,
+}
+
+static EMPTY_BLK: Block = Block { pool: "".to_owned(), id: 0u64 };
+static EMPTY_KEY: INode = INode { id: 0u64 };
+
 #[derive(Parser, Debug)]
 pub struct Opts {
     #[clap(value_enum, long)]
@@ -67,12 +75,13 @@ async fn main() {
 async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
     const KEYNODE_SN_ADDR: &str = "127.0.0.55:4345";
 
+    // name, inode, blocks
     let canned_keys = vec![
-        ("dingo".to_owned(), vec![
+        ("dingo".to_owned(), 5678u64, vec![
             Block { pool: "x".to_owned(), id: 200u64 },
             Block { pool: "x".to_owned(), id: 300u64 },
         ]),
-        ("yak".to_owned(), vec![
+        ("yak".to_owned(), 1234u64, vec![
             Block { pool: "x".to_owned(), id: 400u64 }
         ]),
     ];
@@ -94,57 +103,93 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
 }
 
 #[allow(dead_code)]
-async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
+async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, u64, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
-    let cli_a_id = Uuid::new_v4();
-    let cli_b_id = Uuid::new_v4();
-    let _canned_reqs = vec![
-        (
-            CKRequest::Info {
-                id: ClientID { id: cli_a_id },
-                key: "dingo".to_owned(),
-            },
-            SocketAddr::from(([127, 0, 0, 1], 4344))
-        ),
-        (
-            CKRequest::Info {
-                id: ClientID { id: cli_b_id },
-                key: "dingo".to_owned(),
-            },
-            SocketAddr::from(([127, 0, 0, 1], 4345))
-        ),
-        (
-            CKRequest::Info {
-                id: ClientID { id: cli_a_id },
-                key: "yak".to_owned(),
-            },
-            SocketAddr::from(([127, 0, 0, 1], 4344))
-        ),
-    ];
-
     let init_keys = init_keys.to_vec();
+
+    let mut seq = 1u64 + init_keys.iter()
+        .fold(0u64, |acc, (_, inode, _)| acc.max(*inode));
 
     let mut df = hydroflow_syntax! {
 
         // client
+        // TODO: keep id->addr map elsewhere?
         client_demux = source_stream_serde(cl_inbound)
             -> map(Result::unwrap)
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
-            -> demux(|(cl_req, addr), var_args!(info, errs)|
+            -> demux(|(cl_req, addr), var_args!(create, info, errs)|
                     match cl_req {
-                        CKRequest::Info { id, key, .. } => info.give((key, (id, addr))), // TODO: keep id->addr map elsewhere?
+                        CKRequest::Info { id, key, .. } => info.give(cl_req, addr), //(key, ClientInfo { id, addr })),
+                        CKRequest::Create { id, key, .. } => create.give(cl_req, addr), //(key, ClientInfo { id, addr})),
                         _ => errs.give((cl_req, addr)),
                     }
                 );
 
-        client_demux[info]
+        // (key, inode)
+        key_inode = union()
+                //-> persist() // not necessary w/ 'static on the join?
+                -> [1]key_map;
+        disk_key_inode = source_iter(init_keys)
+                -> map(|(key, inode, blocks)| (key, inode))
+                -> [0]key_inode;
+
+        // (inode, seq, block)
+        inode_block = union();
+        disk_inode_block = source_iter(init_keys)
+                // "store" as (inode, seq, block) to preserve order
+                -> flat_map(|(_, inode, blocks)| blocks.enumerate().map(move |(i, block)| (INode { id: inode, }, i, block)))
+            //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
+            //-> [1]key_map;
+            -> [0]inode_block;
+
+        creates = client_demux[create]
+                -> inspect(|(key, (_, addr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), key, addr))
+                -> tee();
+
+        // creates in key_inode return err (already exist)
+        // creates \not in key_node are allocated an inode, added to key_inode, EMPTY_BLOCK added to inode_block
+        creates[0]
+            -> map(|(key, clinfo)| (key, (EMPTY_KEY, clinfo)))
+            -> 
+
+        client_demux[info] // (Cmd)
+            -> inspect(|(req, addr)| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req.key, addr))
+            -> map(|(req, addr)| (req.key, (req, addr)))
             -> [0]key_map;
+
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
+
+        // join requests LHS:(key, client) with existing key map RHS:(key, blocks)
+        key_map = join::<'tick, 'static>()
+            -> tee();
+
+        key_map[0]
+            -> filter(|(key, (req, addr))| req.is_create())
+            -> [0]create_key_resolve;
+
+        // LHS: lookup inode by key, RHS: requests
+        create_key_resolve =
+            -> zip_longest() // XXX NOT AT ALL CORRECT: need to join, not zip sequences
+            // Result? Option?
+            -> demux(|k: EitherOrBoth<(String, (CKRequest, SocketAddr)), (String, (INode, ClientInfo))>, var_args!(create, exists)|
+                match k {
+                    EitherOrBoth::Left((key, (req, addr))) => panic!("FATAL: lookup without request: {:?}", (key, (req, addr))),
+                    // exists
+                    EitherOrBoth::Both((key, (req, addr)), (_, (inode, clinfo))) => create.give((key, (req, addr)), (inode, clinfo)),
+                    // no name -> mapping
+                    EitherOrBoth::Right((key, (inode, clinfo))) => info.give((key, (inode, clinfo))),
+                }
+            );
+
+            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
+                |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
+            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
+            -> [0]block_map;
 
         // segnode
         segnode_demux = source_stream_serde(sn_inbound)
@@ -161,6 +206,8 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
         heartbeats = segnode_demux[heartbeat]
             -> tee();
+        segnode_demux[errs]
+          -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
 
         // Heartbeat response
         heartbeats
@@ -216,31 +263,18 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             //-> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
             -> [1]last_contact_map;
 
-        // join all requests for blocks
+        // join all requests for blocks reported from segment nodes
         block_map = _lattice_join_fused_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
             // can we replace `clone()` with `to_owned()`? The compiler thinks so!
             -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
                     (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
-            //-> inspect(|x: &(SegmentNodeID, MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>)| println!("{}: KN: RPC_LC: {x:?}", Utc::now()))
             -> [0]last_contact_map;
 
         heartbeats
             -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, SocketAddr, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
             -> [1]block_map;
 
-        // join (key, client) requests with existing key map (key, blocks)
-        key_map = join::<'tick, 'static>()
-            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
-                |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
-            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
-            -> [0]block_map;
 
-        source_iter(init_keys)
-            //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
-            -> [1]key_map;
-
-        segnode_demux[errs]
-          -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
     };
 
     //df.meta_graph().unwrap().write_mermaid(std::fs::File::create("lattice.md")).unwrap();

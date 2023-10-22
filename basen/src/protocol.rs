@@ -37,6 +37,12 @@ pub struct Block {
     //pub epoch: u64, // append count
 }
 
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct INode {
+    pub id: u64,
+}
+
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct LocatedBlock {

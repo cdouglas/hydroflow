@@ -8,15 +8,15 @@ use std::net::SocketAddr;
 use crate::protocol::*;
 
 #[allow(dead_code)]
-pub(crate) async fn run_client(keynode_client_addr: SocketAddr, opts: Opts) {
-    println!("Connecting to {:?}", keynode_client_addr);
+pub(crate) async fn run_client(ck_addr: SocketAddr, opts: Opts) {
+    println!("Connecting to {:?}", ck_addr);
 
     let (outbound, inbound) = connect_tcp_bytes();
     let client_id = ClientID { id: Uuid::new_v4() };
 
     let mut flow = hydroflow_syntax! {
-        outbound_chan = // union() ->  // commented out since we only use this once in the client template
-            dest_sink_serde(outbound);
+        outbound_chan = union()
+            -> dest_sink_serde(outbound);
 
         kn_inbound = source_stream_serde(inbound)
             -> map(|udp_msg| udp_msg.unwrap())
@@ -54,17 +54,22 @@ pub(crate) async fn run_client(keynode_client_addr: SocketAddr, opts: Opts) {
             );
 
         repl[create]
-            -> null();
+            -> map(|key: String| (CKRequest::Create{ id: client_id.clone(), key }, ck_addr) )
+            -> outbound_chan;
+
+        //repl[addblock]
+        //    -> map(|key: String| (CKRequest::AddBlock{ id: client_id.clone(), key }, ck_addr) )
+        //    -> outbound_chan;
 
         repl[info]
-            //-> map(|argv: &[&str]| (CKRequest::Info{ id: client_id.clone(), key: argv[1].to_string() }, keynode_client_addr) )
-            -> map(|key: String| (CKRequest::Info{ id: client_id.clone(), key }, keynode_client_addr) )
+            //-> map(|argv: &[&str]| (CKRequest::Info{ id: client_id.clone(), key: argv[1].to_string() }, ck_addr) )
+            -> map(|key: String| (CKRequest::Info{ id: client_id.clone(), key }, ck_addr) )
             -> outbound_chan;
 
         repl[errs]
             -> for_each(|_| println!("{}: ERR", Utc::now()));
 
-            //-> map(|key| (CKRequest::Info{ id: client_id.clone(), key: key.unwrap() }, keynode_client_addr) )
+            //-> map(|key| (CKRequest::Info{ id: client_id.clone(), key: key.unwrap() }, ck_addr) )
             //-> outbound_chan;
     };
 
