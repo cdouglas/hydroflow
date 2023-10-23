@@ -148,13 +148,17 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
         creates = client_demux[create]
                 -> inspect(|(key, (_, addr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), key, addr))
-                -> tee();
+                -> null();
+                //-> tee();
 
-        // creates in key_inode return err (already exist)
-        // creates \not in key_node are allocated an inode, added to key_inode, EMPTY_BLOCK added to inode_block
-        creates[0]
-            -> map(|(key, clinfo)| (key, (EMPTY_KEY, clinfo)))
-            -> 
+        //// creates in key_inode return err (already exist)
+        //// creates \not in key_node are allocated an inode, added to key_inode, EMPTY_BLOCK added to inode_block
+        //creates[0]
+        //    -> map(|(key, clinfo)| (key, (EMPTY_KEY, clinfo)))
+        //    -> 
+
+        //creates[1]
+        //    -> key_map[0]
 
         client_demux[info] // (Cmd)
             -> inspect(|(req, addr)| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req.key, addr))
@@ -164,28 +168,25 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         client_demux[errs]
             -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
 
-        // join requests LHS:(key, client) with existing key map RHS:(key, blocks)
+        // join requests LHS:(key, req) with existing key map RHS:(key, inode)
         key_map = join::<'tick, 'static>()
-            -> tee();
+            -> demux(|(key, (req, inode)), var_args!(create, info, errs)|
+                    match req {
+                        CKRequest::Create { id, key, .. } => create.give(req, inode),
+                        CKRequest::Info { id, key, .. } => info.give(req, inode),
+                        _ => errs.give((key, (req, inode))),
+                    }
+                );
 
-        key_map[0]
-            -> filter(|(key, (req, addr))| req.is_create())
+        key_map[create]
+            -> map(|req, inode)|
             -> [0]create_key_resolve;
+
+        key_map[info]
+            -> 
 
         // LHS: lookup inode by key, RHS: requests
         create_key_resolve =
-            -> zip_longest() // XXX NOT AT ALL CORRECT: need to join, not zip sequences
-            // Result? Option?
-            -> demux(|k: EitherOrBoth<(String, (CKRequest, SocketAddr)), (String, (INode, ClientInfo))>, var_args!(create, exists)|
-                match k {
-                    EitherOrBoth::Left((key, (req, addr))) => panic!("FATAL: lookup without request: {:?}", (key, (req, addr))),
-                    // exists
-                    EitherOrBoth::Both((key, (req, addr)), (_, (inode, clinfo))) => create.give((key, (req, addr)), (inode, clinfo)),
-                    // no name -> mapping
-                    EitherOrBoth::Right((key, (inode, clinfo))) => info.give((key, (inode, clinfo))),
-                }
-            );
-
             -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
                 |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
             -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))

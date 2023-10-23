@@ -78,7 +78,7 @@ pub struct SegmentNodeID {
 // client -> key node
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
-pub enum CKRequest {
+pub enum CKRequest { // TODO client requests should include seq
     Create   { id: ClientID, key: String },
     AddBlock { id: ClientID, lease: KeyLease },
     Open     { id: ClientID, key: String },
