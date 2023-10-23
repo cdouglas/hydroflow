@@ -37,8 +37,9 @@ pub struct Cmd {
     addr: SocketAddr,
 }
 
-static EMPTY_BLK: Block = Block { pool: "".to_owned(), id: 0u64 };
-static EMPTY_KEY: INode = INode { id: 0u64 };
+//static EMPTY_HOST: SocketAddr = ipv4_resolve("0.0.0.0").unwrap();
+//static EMPTY_BLK: Block = Block { pool: "".to_owned(), id: 0u64 };
+//static EMPTY_KEY: INode = INode { id: 0u64 };
 
 #[derive(Parser, Debug)]
 pub struct Opts {
@@ -77,11 +78,11 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
 
     // name, inode, blocks
     let canned_keys = vec![
-        ("dingo".to_owned(), 5678u64, vec![
+        ("dingo".to_owned(), INode { id: 5678u64, }, vec![
             Block { pool: "x".to_owned(), id: 200u64 },
             Block { pool: "x".to_owned(), id: 300u64 },
         ]),
-        ("yak".to_owned(), 1234u64, vec![
+        ("yak".to_owned(), INode { id: 1234u64, }, vec![
             Block { pool: "x".to_owned(), id: 400u64 }
         ]),
     ];
@@ -103,7 +104,7 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
 }
 
 #[allow(dead_code)]
-async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, u64, Vec<Block>)]) {
+async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, INode, Vec<Block>)]) {
     let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
@@ -111,8 +112,8 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
     let init_keys = init_keys.to_vec();
 
-    let mut seq = 1u64 + init_keys.iter()
-        .fold(0u64, |acc, (_, inode, _)| acc.max(*inode));
+    //let mut seq = 1u64 + init_keys.iter()
+    //    .fold(0u64, |acc, (_, inode, _)| acc.max(*inode));
 
     let mut df = hydroflow_syntax! {
 
@@ -122,75 +123,109 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> map(Result::unwrap)
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr), var_args!(create, info, errs)|
-                    match cl_req {
-                        CKRequest::Info { id, key, .. } => info.give(cl_req, addr), //(key, ClientInfo { id, addr })),
-                        CKRequest::Create { id, key, .. } => create.give(cl_req, addr), //(key, ClientInfo { id, addr})),
+                    match &cl_req {
+                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))), //(key, ClientInfo { id, addr })),
+                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))), //(key, ClientInfo { id, addr})),
                         _ => errs.give((cl_req, addr)),
                     }
                 );
+        client_demux[errs] // TODO: error response
+            -> for_each(|(req, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", req, addr));
+
+        // XXX DISABLED
+        create_key_inode = client_demux[create]
+            -> inspect(|(key, (req, addr)): &(String, (CKRequest, SocketAddr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), req, addr))
+            -> null();
+
+        info_key_inode = client_demux[info]
+            -> inspect(|(key, (req, addr))| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req, addr))
+            -> tee();
+        info_key_inode[0]
+            -> [0]key_map;
+        info_key_inode[1]
+            -> map(|(key, (req, addr))| ((req, 1u8), None)) //(EMPTY_KEY, addr)))
+            -> req_merge;
+
+        req_merge = union()
+            //-> fold_keyed(|| vec![], |old: &mut Vec<_>, new: ((CKRequest, u8), _)| old.push(new))
+            -> inspect(|((req, fragment), placeholder): &((CKRequest, u8), Option<String>) | println!("REQ_MERGE: {:?} {:?}", req, fragment))
+            -> null();
 
         // (key, inode)
-        key_inode = union()
+        // TODO: add back w/ create
+        //key_inode = union()
                 //-> persist() // not necessary w/ 'static on the join?
-                -> [1]key_map;
-        disk_key_inode = source_iter(init_keys)
-                -> map(|(key, inode, blocks)| (key, inode))
-                -> [0]key_inode;
+                //-> [1]key_map;
+        log = source_iter(init_keys)
+            -> tee();
+        disk_key_inode = log[0]
+            -> map(|(key, inode, _): (String, INode, Vec<Block>)| (key, inode))
+            -> unique()
+            -> [1]key_map;
+                //-> [0]key_inode;
 
         // (inode, seq, block)
-        inode_block = union();
-        disk_inode_block = source_iter(init_keys)
+        // TODO: add back w/ create;
+        // inode_block = union();
+        disk_inode_block = log[1]
                 // "store" as (inode, seq, block) to preserve order
-                -> flat_map(|(_, inode, blocks)| blocks.enumerate().map(move |(i, block)| (INode { id: inode, }, i, block)))
+            -> flat_map(|(_, inode, blocks)| blocks.into_iter().enumerate().map(move |(i, block)| (inode.clone(), (i, block))))
             //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
-            //-> [1]key_map;
-            -> [0]inode_block;
-
-        creates = client_demux[create]
-                -> inspect(|(key, (_, addr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), key, addr))
-                -> null();
-                //-> tee();
-
-        //// creates in key_inode return err (already exist)
-        //// creates \not in key_node are allocated an inode, added to key_inode, EMPTY_BLOCK added to inode_block
-        //creates[0]
-        //    -> map(|(key, clinfo)| (key, (EMPTY_KEY, clinfo)))
-        //    -> 
-
-        //creates[1]
-        //    -> key_map[0]
-
-        client_demux[info] // (Cmd)
-            -> inspect(|(req, addr)| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req.key, addr))
-            -> map(|(req, addr)| (req.key, (req, addr)))
-            -> [0]key_map;
-
-        client_demux[errs]
-            -> for_each(|(msg, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", msg, addr));
+            //-> inode_block;
+            -> [1]inode_map;
 
         // join requests LHS:(key, req) with existing key map RHS:(key, inode)
         key_map = join::<'tick, 'static>()
-            -> demux(|(key, (req, inode)), var_args!(create, info, errs)|
-                    match req {
-                        CKRequest::Create { id, key, .. } => create.give(req, inode),
-                        CKRequest::Info { id, key, .. } => info.give(req, inode),
-                        _ => errs.give((key, (req, inode))),
+            -> demux(|(key, ((req, addr), inode)), var_args!(create, info)| //, errs)|
+                    match &req {
+                        CKRequest::Create { id, key, .. } => create.give((inode, (req, addr))),
+                        CKRequest::Info { id, key, .. } => info.give((inode, (req, addr))),
+                        _ => panic!(), //errs.give((key, (req, inode))),
+                    }
+                );
+        //key_map[errs]
+        //    -> for_each(|(key, (req, inode))| println!("KN: Unexpected CL message type: {:?} from {:?}", req, addr));
+
+        create_inode_block = key_map[create]
+            -> inspect(|(inode, (req, addr))| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
+            // TODO: err
+            -> null();
+
+        info_inode_block = key_map[info]
+            -> inspect(|(inode, (req, addr))| println!("{}: KN: INFO {:?} found existing inode {:?}", Utc::now(), req, inode))
+            -> tee();
+        info_inode_block[0]
+            -> [0]inode_map;
+        info_inode_block[1]
+            -> map(|(inode, (req, addr))| ((req, 2u8), None)) // record missing key->inode?
+            -> req_merge;
+
+        inode_map = join::<'tick, 'static>()
+            -> demux(|(inode, ((req, addr), (seq, block))), var_args!(create, info)| //, errs)|
+                    match &req {
+                        CKRequest::Create { id, key, .. } => create.give((block, (seq, inode, key.clone(), req, addr))),
+                        CKRequest::Info { id, key, .. } => info.give((block, (seq, inode, key.clone(), id.clone(), req, addr))),
+                        _ => panic!(), //errs.give(req),
                     }
                 );
 
-        key_map[create]
-            -> map(|req, inode)|
-            -> [0]create_key_resolve;
+        inode_map[create]
+            // should be an error for create to be routed here
+            -> inspect(|(block, (seq, inode, key, req, addr))| println!("WTF0: {:?} {:?} {:?} {:?} {:?} {:?}", block, seq, inode, key, req, addr))
+            -> null();
 
-        key_map[info]
-            -> 
-
-        // LHS: lookup inode by key, RHS: requests
-        create_key_resolve =
-            -> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
-                |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
-            -> inspect(|x| println!("{}: KN: LOOKUP_KEY_MAP: {x:?}", Utc::now()))
+        info_block_host = inode_map[info]
+            -> tee();
+        info_block_host[0]
+            // COMPAT w/ old lattice stuff
+            -> inspect(|(block, (seq, inode, key, id, req, addr))| println!("DEBUG0: {:?} {:?} {:?} {:?} {:?} {:?} {:?}", block, seq, inode, key, id, req, addr))
+            -> map(|(block, (seq, inode, key, id, req, addr)): (Block, (usize, INode, String, ClientID, CKRequest, SocketAddr))| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([(id, addr)]))])))
+            //-> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
+            //    |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
             -> [0]block_map;
+        info_block_host[1]
+            -> map(|(block, (seq, inode, key, id, req, addr))| ((req, 3u8), None)) // record missing inode->block?
+            -> req_merge;
 
         // segnode
         segnode_demux = source_stream_serde(sn_inbound)

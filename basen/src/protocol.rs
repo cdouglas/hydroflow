@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct KeyLease {
     pub id: Uuid, // replace w/ something readable, including cluster ID, epoch, etc.
@@ -76,7 +76,7 @@ pub struct SegmentNodeID {
 }
 
 // client -> key node
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub enum CKRequest { // TODO client requests should include seq
     Create   { id: ClientID, key: String },
