@@ -37,10 +37,6 @@ pub struct Cmd {
     addr: SocketAddr,
 }
 
-//static EMPTY_HOST: SocketAddr = ipv4_resolve("0.0.0.0").unwrap();
-//static EMPTY_BLK: Block = Block { pool: "".to_owned(), id: 0u64 };
-//static EMPTY_KEY: INode = INode { id: 0u64 };
-
 #[derive(Parser, Debug)]
 pub struct Opts {
     #[clap(value_enum, long)]
@@ -85,6 +81,8 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
         ("yak".to_owned(), INode { id: 1234u64, }, vec![
             Block { pool: "x".to_owned(), id: 400u64 }
         ]),
+        ("zebra".to_owned(), INode { id: 2345u64, }, vec![
+        ]),
     ];
 
     let canned_blocks = vec![
@@ -116,32 +114,53 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
     //    .fold(0u64, |acc, (_, inode, _)| acc.max(*inode));
 
     let mut df = hydroflow_syntax! {
+        // load initial keyset
+        log = source_iter(init_keys)
+            -> tee();
+        disk_key_inode = log[0]   // (key, inode)
+            -> map(|(key, inode, _): (String, INode, Vec<Block>)| (key, inode))
+            -> unique() // necessary?
+            -> [1]key_map;
+
+        disk_inode_block = log[1] // (inode, seq, block)
+            // store as (inode, seq, block) to preserve order
+            -> flat_map(|(_, inode, blocks)| blocks.into_iter().enumerate().map(move |(i, block)| (inode.clone(), (i, block))))
+            -> [1]inode_map;
 
         // client
-        // TODO: keep id->addr map elsewhere?
         client_demux = source_stream_serde(cl_inbound)
             -> map(Result::unwrap)
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr), var_args!(create, info, errs)|
                     match &cl_req {
-                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))), //(key, ClientInfo { id, addr })),
-                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))), //(key, ClientInfo { id, addr})),
+                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
+                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
                         _ => errs.give((cl_req, addr)),
                     }
                 );
         client_demux[errs] // TODO: error response
             -> for_each(|(req, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", req, addr));
 
-        // XXX DISABLED
+        // LHS of join with key->inode map
+        req_key_map = union()
+            -> [0]key_map;
+
+        // REQ :: empty -> create
+        // REQ :: inode -> error
         create_key_inode = client_demux[create]
             -> inspect(|(key, (req, addr)): &(String, (CKRequest, SocketAddr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), req, addr))
-            -> null();
+            -> tee();
+        create_key_inode[0]
+            -> req_key_map;
+        create_key_inode[1]
+            -> map(|(key, (req, addr))| ((req, 1u8), None)) // record missing key->inode?
+            -> req_merge;
 
         info_key_inode = client_demux[info]
             -> inspect(|(key, (req, addr))| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req, addr))
             -> tee();
         info_key_inode[0]
-            -> [0]key_map;
+            -> req_key_map;
         info_key_inode[1]
             -> map(|(key, (req, addr))| ((req, 1u8), None)) //(EMPTY_KEY, addr)))
             -> req_merge;
@@ -151,40 +170,15 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> inspect(|((req, fragment), placeholder): &((CKRequest, u8), Option<String>) | println!("REQ_MERGE: {:?} {:?}", req, fragment))
             -> null();
 
-        // (key, inode)
-        // TODO: add back w/ create
-        //key_inode = union()
-                //-> persist() // not necessary w/ 'static on the join?
-                //-> [1]key_map;
-        log = source_iter(init_keys)
-            -> tee();
-        disk_key_inode = log[0]
-            -> map(|(key, inode, _): (String, INode, Vec<Block>)| (key, inode))
-            -> unique()
-            -> [1]key_map;
-                //-> [0]key_inode;
-
-        // (inode, seq, block)
-        // TODO: add back w/ create;
-        // inode_block = union();
-        disk_inode_block = log[1]
-                // "store" as (inode, seq, block) to preserve order
-            -> flat_map(|(_, inode, blocks)| blocks.into_iter().enumerate().map(move |(i, block)| (inode.clone(), (i, block))))
-            //-> map(|(key, blocks)| (key, SetUnionHashSet::new_from([blocks])))
-            //-> inode_block;
-            -> [1]inode_map;
-
         // join requests LHS:(key, req) with existing key map RHS:(key, inode)
         key_map = join::<'tick, 'static>()
             -> demux(|(key, ((req, addr), inode)), var_args!(create, info)| //, errs)|
                     match &req {
                         CKRequest::Create { id, key, .. } => create.give((inode, (req, addr))),
                         CKRequest::Info { id, key, .. } => info.give((inode, (req, addr))),
-                        _ => panic!(), //errs.give((key, (req, inode))),
+                        _ => panic!(),
                     }
                 );
-        //key_map[errs]
-        //    -> for_each(|(key, (req, inode))| println!("KN: Unexpected CL message type: {:?} from {:?}", req, addr));
 
         create_inode_block = key_map[create]
             -> inspect(|(inode, (req, addr))| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
