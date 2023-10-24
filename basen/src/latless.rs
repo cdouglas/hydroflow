@@ -13,7 +13,7 @@ use crate::helpers::print_graph;
 use crate::Opts;
 
 pub async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, Vec<Block>)]) {
-    let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
+    let (_cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
