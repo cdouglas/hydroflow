@@ -1,5 +1,34 @@
-# 2023-10-02
+# 2023-10-23
 
+Working on restoring INFO
+- add key->inode inode->block
+- report err for empty key, handle empty file, empty host list for blocks
+
+Create a sort/merge of all exhaust from an operator
+- there's some grammar that should, for all histories, produce a response
+- if it is not exhaustive, then the result is either partial for that tick or it's a logic error
+
+e.g., info
+- equijoin w/ key->inode
+  - FNF if failed
+- equijoin w/ inode->(seq, block)
+  - empty file if length = 0
+- equijoin w/ block->host
+  - missing replica if failed
+- equijoin w/ host->last_contact
+  - missing replica if failed
+(etc.)
+
+
+
+# 2023-10-22
+
+Missing left/right outer join
+- alternative: if the join didn't match on the lhs/rhs, produce this instead
+- simulate by merging result
+- simulate w/ cross-product (gross)
+
+How to ensure that, within a single tick, exactly one create succeeds for a given key?
 
 # 2023-09-29
 

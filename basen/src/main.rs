@@ -31,6 +31,18 @@ pub enum GraphType {
     Dot,
 }
 
+struct PartialResult {
+    req_id: Uuid,
+
+}
+
+enum Action {
+    NSLookup    { req: CKRequest, key: String, inode: Option<INode> },
+    INodeLookup { req: CKRequest, inode: INode, block: Option<Vec<Block>>, lease: Option<KeyLease> },
+    BlockLookup { req: CKRequest, block: Block, node: Option<Vec<SegmentNodeID>>, lease: Option<BlockLease> },
+    HostLookup  { req: CKRequest, node: SegmentNodeID, addr: Option<Vec<SocketAddr>> },
+}
+
 #[derive(Parser, Debug)]
 pub struct Opts {
     #[clap(value_enum, long)]
@@ -132,12 +144,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         client_demux[errs] // TODO: error response
             -> for_each(|(req, addr)| println!("KN: Unexpected CL message type: {:?} from {:?}", req, addr));
 
-        // LHS of join with key->inode map
-        req_key_map = union()
-            -> [0]key_map;
-
-        // REQ :: empty -> create
-        // REQ :: inode -> error
+        // CREATE: client_demux
         create_key_inode = client_demux[create]
             -> inspect(|(_key, (req, addr)): &(String, (CKRequest, SocketAddr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), req, addr))
             -> tee();
@@ -147,6 +154,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> map(|(_key, (req, _addr))| ((req, 1u8), None)) // record missing key->inode?
             -> req_merge;
 
+        // INFO: client_demux
         info_key_inode = client_demux[info]
             -> inspect(|(_key, (req, addr))| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req, addr))
             -> tee();
@@ -156,9 +164,28 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> map(|(_key, (req, _addr))| ((req, 1u8), None)) //(EMPTY_KEY, addr)))
             -> req_merge;
 
+        // LHS of join with key->inode map
+        req_key_map = union()
+            -> [0]key_map;
+
+        // merge all Actions produced as exhaust
         req_merge = union()
             //-> fold_keyed(|| vec![], |old: &mut Vec<_>, new: ((CKRequest, u8), _)| old.push(new))
             -> inspect(|((req, fragment), _placeholder): &((CKRequest, u8), Option<String>) | println!("REQ_MERGE: {:?} {:?}", req, fragment))
+            //-> fold_keyed(|| vec![], |old: &mut Vec<_>, new: ((CKRequest, u8), Option<String>)| {
+            //    match new {
+            //        ((CKRequest::Create { .. }, _), Some(key)) => old.push(Action::NSLookup { key, inode: None }),
+            //        ((CKRequest::Info { .. }, _), Some(key)) => old.push(Action::NSLookup { key, inode: None }),
+            //        _ => (),
+            //    
+            //    })
+            -> demux(|(cl_req, addr), var_args!(create, info, errs)|
+                    match &cl_req {
+                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
+                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
+                        _ => errs.give((cl_req, addr)),
+                    }
+                );
             -> null();
 
         // join requests LHS:(key, req) with existing key map RHS:(key, inode)
