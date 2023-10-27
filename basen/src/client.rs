@@ -54,7 +54,7 @@ pub(crate) async fn run_client(ck_addr: SocketAddr, opts: Opts) {
             );
 
         repl[create]
-            -> map(|key: String| (CKRequest::Create{ id: client_id.clone(), key }, ck_addr) )
+            -> map(|key: String| (CKRequest { id: client_id.clone(), payload: CKRequestType::Create{ key } }, ck_addr) )
             -> outbound_chan;
 
         //repl[addblock]
@@ -63,7 +63,7 @@ pub(crate) async fn run_client(ck_addr: SocketAddr, opts: Opts) {
 
         repl[info]
             //-> map(|argv: &[&str]| (CKRequest::Info{ id: client_id.clone(), key: argv[1].to_string() }, ck_addr) )
-            -> map(|key: String| (CKRequest::Info{ id: client_id.clone(), key }, ck_addr) )
+            -> map(|key: String| (CKRequest { id: client_id.clone(), payload: CKRequestType::Info{ key } }, ck_addr) )
             -> outbound_chan;
 
         repl[errs]

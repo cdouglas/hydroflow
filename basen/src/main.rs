@@ -32,8 +32,7 @@ pub enum GraphType {
 }
 
 struct PartialResult {
-    req_id: Uuid,
-
+    action: Action,
 }
 
 enum Action {
@@ -134,10 +133,10 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         client_demux = source_stream_serde(cl_inbound)
             -> map(Result::unwrap)
             -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
-            -> demux(|(cl_req, addr), var_args!(create, info, errs)|
-                    match &cl_req {
-                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
-                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
+            -> demux(|(cl_req, addr): (CKRequest, SocketAddr), var_args!(create, info, errs)|
+                    match &cl_req.payload {
+                        CKRequestType::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
+                        CKRequestType::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
                         _ => errs.give((cl_req, addr)),
                     }
                 );
@@ -179,21 +178,14 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             //        _ => (),
             //    
             //    })
-            -> demux(|(cl_req, addr), var_args!(create, info, errs)|
-                    match &cl_req {
-                        CKRequest::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
-                        CKRequest::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
-                        _ => errs.give((cl_req, addr)),
-                    }
-                );
             -> null();
 
         // join requests LHS:(key, req) with existing key map RHS:(key, inode)
         key_map = join::<'tick, 'static>()
-            -> demux(|(_key, ((req, addr), inode)), var_args!(create, info)| //, errs)|
-                    match &req {
-                        CKRequest::Create {   .. } => create.give((inode, (req, addr))),
-                        CKRequest::Info {   .. } => info.give((inode, (req, addr))),
+            -> demux(|(_key, ((req, addr), inode)) : (String, ((CKRequest, SocketAddr), INode)), var_args!(create, info)| //, errs)|
+                    match &req.payload {
+                        CKRequestType::Create {   .. } => create.give((inode, (req, addr))),
+                        CKRequestType::Info {   .. } => info.give((inode, (req, addr))),
                         _ => panic!(),
                     }
                 );
@@ -213,10 +205,10 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> req_merge;
 
         inode_map = join::<'tick, 'static>()
-            -> demux(|(inode, ((req, addr), (seq, block))), var_args!(create, info)| //, errs)|
-                    match &req {
-                        CKRequest::Create {  key, .. } => create.give((block, (seq, inode, key.clone(), req, addr))),
-                        CKRequest::Info { id, key, .. } => info.give((block, (seq, inode, key.clone(), id.clone(), req, addr))),
+            -> demux(|(inode, ((req, addr), (seq, block))): (INode, ((CKRequest, SocketAddr), (usize, Block))), var_args!(create, info)| //, errs)|
+                    match &req.payload {
+                        CKRequestType::Create {  key, .. } => create.give((block, (seq, inode, key.clone(), req, addr))),
+                        CKRequestType::Info { key, .. } => info.give((block, (seq, inode, key.clone(), req.id.clone(), req, addr))),
                         _ => panic!(), //errs.give(req),
                     }
                 );

@@ -1,3 +1,7 @@
+# 2023-10-27
+
+Working with hydroflow is the least fun I've ever had programming.
+
 # 2023-10-23
 
 Working on restoring INFO

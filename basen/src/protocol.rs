@@ -3,14 +3,14 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct KeyLease {
     pub id: Uuid, // replace w/ something readable, including cluster ID, epoch, etc.
     //pub expiration: DateTime<Utc>,
 }
 
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct BlockLease {
     pub lease: KeyLease,
@@ -76,14 +76,22 @@ pub struct SegmentNodeID {
 }
 
 // client -> key node
-#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
-pub enum CKRequest { // TODO client requests should include seq
-    Create   { id: ClientID, key: String },
-    AddBlock { id: ClientID, lease: KeyLease },
-    Open     { id: ClientID, key: String },
-    Info     { id: ClientID, key: String },
-    Close    { id: ClientID, lease: KeyLease, blocks: Vec<Block> }, // flag to block?
+pub struct CKRequest {
+    pub id: ClientID,
+    // seq: u64,
+    pub payload: CKRequestType,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Serialize, Deserialize, Debug)]
+#[rustfmt::skip]
+pub enum CKRequestType { // TODO client requests should include seq
+    Create   { key: String },
+    AddBlock { lease: KeyLease },
+    Open     { key: String },
+    Info     { key: String },
+    Close    { lease: KeyLease, blocks: Vec<Block> }, // flag to block?
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
