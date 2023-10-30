@@ -3,13 +3,12 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use clap::{Parser, ValueEnum};
 
-
-
 use hydroflow::util::{bind_tcp_bytes, connect_tcp_bytes, ipv4_resolve};
 use hydroflow::{hydroflow_syntax, tokio};
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
+use std::collections::HashMap;
 
 use crate::protocol::*;
 use crate::client::run_client;
@@ -48,6 +47,58 @@ enum Action {
     INodeLookup { inode: INode, block: Option<(usize, Block)>, }, // , lease: Option<KeyLease> },
     BlockLookup { block: Block, node: Option<SegmentNodeID>, }, //lease: Option<BlockLease> },
     HostLookup  { node: SegmentNodeID, addr: Option<SocketAddr> },
+}
+
+struct InfoResponse {
+    pub key: Option<String>,
+    pub inode: Option<INode>,
+    pub seq_block: HashMap<usize, Block>,
+    pub block_sn:  HashMap<Block, Vec<SegmentNodeID>>,
+    pub locations: HashMap<SegmentNodeID,SocketAddr>,
+    pub addr: Option<SocketAddr>,
+}
+
+impl InfoResponse {
+    fn new() -> Self {
+        Self {
+            key: None,
+            inode: None,
+            seq_block: HashMap::new(), // seq -> block
+            block_sn: HashMap::new(),  // block -> [sn]
+            locations: HashMap::new(), // sn -> addr
+            addr: None,
+        }
+    }
+}
+
+impl Into<(CKResponse, SocketAddr)> for InfoResponse {
+    fn into(self) -> (CKResponse, SocketAddr) {
+        let mut loc_blocks = vec![];
+        let mut seq_block = self.seq_block.iter().collect::<Vec<_>>();
+        seq_block.sort();
+        for (i, (seq, block)) in seq_block.into_iter().enumerate() {
+            assert_eq!(i, *seq); // TODO don't crash, return internal error
+            let mut locs = vec![];
+            if let Some(replicas) = self.block_sn.get(block) {
+                for replica in replicas {
+                    if let Some(locations) = self.locations.get(replica) {
+                        locs.push(locations.clone());
+                    }
+                }
+            }
+            loc_blocks.push(LocatedBlock { block: block.clone(), locations: locs });
+        }
+        (CKResponse::Info {
+            key: self.key.unwrap(),
+            blocks: loc_blocks,
+        },
+        self.addr.unwrap())
+    }
+}
+
+enum PendingMutation {
+    AddKey { key: String },                   // allocates inode, lease
+    AddBlock { inode: INode, block: Block, }, // allocates (seq, block)
 }
 
 #[derive(Parser, Debug)]
@@ -113,15 +164,15 @@ async fn run_servers(keynode_client_addr: SocketAddr, opts: Opts) {
 
 #[allow(dead_code)]
 async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_addr: SocketAddr, init_keys: &[(String, INode, Vec<Block>)]) {
-    let (_cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
+    let (cl_outbound, cl_inbound, cl_addr) = bind_tcp_bytes(keynode_client_addr).await;
     let (sn_outbound, sn_inbound, sn_addr) = bind_tcp_bytes(ipv4_resolve(keynode_sn_addr).unwrap()).await;
     println!("{}: KN<->SN: Listening on {}", Utc::now(), sn_addr);
     println!("{}: KN<->CL: Listening on {}", Utc::now(), cl_addr);
 
     let init_keys = init_keys.to_vec();
 
-    //let mut seq = 1u64 + init_keys.iter()
-    //    .fold(0u64, |acc, (_, inode, _)| acc.max(*inode));
+    let mut req_seq = 0u64..;
+    let mut block_seq = 1u64 + init_keys.iter().fold(0u64, |acc, (_, _, blocks)| acc.max(blocks.len() as u64));
 
     let mut df = hydroflow_syntax! {
         // load initial keyset
@@ -139,9 +190,10 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
         new_reqs = source_stream_serde(cl_inbound)
             -> map(Result::unwrap)
+            //-> enumerate::<'static>()
             -> tee();
         // merge all incoming requests from this tick (TODO: should be able to defer reqs to next tick)
-        tick_reqs = new_reqs[0] // TODO idx still necessary?
+        tick_reqs = new_reqs
             -> map(|(cl_req, addr): (CKRequest, SocketAddr)| (cl_req.id.clone(), (cl_req, addr)))
             -> tee();
 
@@ -168,16 +220,14 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> inspect(|(key, id): &(String, ClientID)| println!("{}: KN: {:?} INFO {:?}", Utc::now(), id, key))
             -> req_key_inode;
 
-        // LHS of join with key->inode map
-        // (key, reqid): String, ClientID
+        // Key -> INode
         req_key_inode = union() -> tee();
         req_key_inode[0] // record EMPTY result
             -> map(|(key, id): (String, ClientID)| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: None } })
-            -> req_merge;
+            -> exhaust;
         req_key_inode[1] // attempt join
             -> [0]key_inode;
 
-        // join requests LHS:(key, req) with existing key map RHS:(key, inode)
         key_inode = join::<'tick, 'static>()
             -> inspect(|(key, (_id, inode)) : &(String, (ClientID, INode))| println!("{}: KN: KEY {:?} found existing inode {:?}", Utc::now(), key, inode))
             -> map(|(key, (id, inode))| (id, (key, inode)))
@@ -188,7 +238,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> tee();
         resp_key_inode[0]
             -> map(|(id, ((key, inode), (_req, _)))| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: Some(inode.clone()) } })
-            -> req_merge;
+            -> exhaust;
 
         key_inode_result = resp_key_inode[1]
             -> demux(|(id, ((_key, inode), (req, _))) : (ClientID, ((String, INode), (CKRequest, SocketAddr))), var_args!(create, info)|
@@ -200,15 +250,16 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
                 );
         key_inode_result[create]
             -> inspect(|(inode, req)| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
-            -> null(); // TODO: overwrite flag; for now, this is sufficient to construct an error in req_merge
+            -> null(); // TODO: overwrite flag; for now, this is sufficient to construct an error in exhaust
 
         key_inode_result[info]
             -> req_inode_block;
         
+        // INode -> Block
         req_inode_block = union() -> tee();
         req_inode_block[0] // EMPTY result
             -> map(|(inode, id): (INode, ClientID)| PartialResult { reqid: id, action: Action::INodeLookup { inode: inode.clone(), block: None, } })
-            -> req_merge;
+            -> exhaust;
         req_inode_block[1] // attempt join
             -> [0]inode_block;
 
@@ -221,7 +272,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         resp_inode_block = join::<'tick, 'tick>() -> tee();
         resp_inode_block[0]
             -> map(|(id, ((inode, seq, block), (_req, _)))| PartialResult { reqid: id, action: Action::INodeLookup { inode: inode.clone(), block: Some((seq, block.clone())), } })
-            -> req_merge;
+            -> exhaust;
         inode_block_result = resp_inode_block[1]
             -> demux(|(id, ((_inode, _seq, block), (req, _))): (ClientID, ((INode, usize, Block), (CKRequest, _))), var_args!(info, errs)|
                     match &req.payload {
@@ -235,10 +286,11 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         inode_block_result[errs] // demux must have at least 2 outputs
             -> null();
 
+        // Block -> SegmentNode
         req_block_host = union() -> tee();
         req_block_host[0] // EMPTY result
             -> map(|(block, id): (Block, ClientID)| PartialResult { reqid: id.clone(), action: Action::BlockLookup { block: block.clone(), node: None, } })
-            -> req_merge;
+            -> exhaust;
         req_block_host[1] // attempt join
             -> [0]block_host;
 
@@ -251,7 +303,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         resp_block_host = join::<'tick, 'tick>() -> tee();
         resp_block_host[0]
             -> map(|(id, ((block, sn_id), (_req, _)))| PartialResult { reqid: id, action: Action::BlockLookup { block: block.clone(), node: Some(sn_id.clone()), } })
-            -> req_merge;
+            -> exhaust;
         block_host_result = resp_block_host[1]
             -> demux(|(id, ((_block, sn_id), (req, _))): (ClientID, ((Block, SegmentNodeID), (CKRequest, SocketAddr))), var_args!(info, errs)|
                     match &req.payload {
@@ -264,10 +316,11 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         block_host_result[errs] // demux must have at least 2 outputs
             -> null();
 
+        // SegmentNode -> SocketAddr
         req_host_live = union() -> tee();
         req_host_live[0] // EMPTY
             -> map(|(sn_id, id): (SegmentNodeID, ClientID)| PartialResult { reqid: id.clone(), action: Action::HostLookup { node: sn_id.clone(), addr: None, } })
-            -> req_merge;
+            -> exhaust;
         req_host_live[1]
             -> [0]host_live;
         host_live = join::<'tick, 'static>()
@@ -280,7 +333,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         resp_host_live = join::<'tick, 'tick>() -> tee();
         resp_host_live[0]
             -> map(|(id, ((sn_id, svc_addr, _last_contact), (_req, _)))| PartialResult { reqid: id, action: Action::HostLookup { node: sn_id.clone(), addr: Some(svc_addr.clone()), } })
-            -> req_merge;
+            -> exhaust;
         host_live_result = resp_host_live[1]
             -> demux(|(id, ((sn_id, _svc_addr, _last_contact), (req, _))): (ClientID, ((SegmentNodeID, SocketAddr, DateTime<Utc>), (CKRequest, SocketAddr))), var_args!(info, errs)|
                     match &req.payload {
@@ -293,32 +346,78 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         host_live_result[errs] // demux must have at least 2 outputs
             -> null();
 
-
         // XXX assuming ClientID is unique, so we can use it as a key
-        req_merge = union()
-            -> inspect(|fragment: &PartialResult | println!("REQ_MERGE: {:?} {:?}", fragment.reqid, fragment))
+        exhaust = union()
+            -> inspect(|fragment: &PartialResult | println!("EXHAUST: {:?} {:?}", fragment.reqid, fragment))
             -> map(|fragment| (fragment.reqid.clone(), fragment))
-            -> [1]resolve;
+            -> [1]redox;
         tick_reqs
-            -> [0]resolve;
-        resolve = join::<'tick, 'tick>()
+            -> [0]redox;
+        redox = join::<'tick, 'tick>()
             -> demux(|(id, ((req, addr), result)) : (ClientID, ((CKRequest, SocketAddr), PartialResult)), var_args!(create, info)|
                     match &req.payload {
-                        CKRequestType::Create { key, .. } => create.give((id, key.clone(), result, addr)),
-                        CKRequestType::Info { key, .. } => info.give((id, key.clone(), result, addr)),
+                        CKRequestType::Create { key, .. } => create.give((id, (key.clone(), result, addr))),
+                        CKRequestType::Info { key, .. } => info.give((id, (key.clone(), result, addr))),
                         _ => panic!(),
                     }
                 );
 
+        // wait, should leases be stored w/ inodes?
+        //req_key_leases = union() -> tee();
+        //req_key_leases[0] // EMPTY
+        //    -> map(|(key, id): (String, ClientID)| PartialResult { reqid: id.clone(), action: Action::NSLookup { key: key.clone(), inode: None } })
+        //    -> exhaust;
+        //key_leases = join::<'tick, 'static>()
+
         // merge all Actions produced as exhaust
         // TODO: need an internal ID for each request, so we can merge on that
-        resolve[create]
-            -> inspect(|(_id, key, result, _addr)| println!("{}: KN: CREATE {:?} RESOLVE({:?})", Utc::now(), key, result))
-            -> null();
+        redox[create]
+            -> inspect(|(_id, (key, result, _addr))| println!("{}: KN: CREATE {:?} REDOX({:?})", Utc::now(), key, result))
+            -> map(|(_id, (_key, _result, addr))| (CKResponse::Create { klease: Err(CKError { description: "already exists".to_owned(), error: CKErrorKind::AlreadyExists }) }, addr))
+            -> respond;
 
-        resolve[info]
-            -> inspect(|(_id, key, result, _addr)| println!("{}: KN: INFO {:?} RESOLVE({:?})", Utc::now(), key, result))
-            -> null();
+        redox[info]
+            -> inspect(|(_id, (key, result, _addr))| println!("{}: KN: INFO {:?} REDOX({:?})", Utc::now(), key, result))
+            // TODO: ask Joe/Lucky how to sort this into runs, so each 
+            -> fold_keyed(InfoResponse::new,
+                |acc: &mut InfoResponse, (_key, result, addr): (String, PartialResult, SocketAddr)| {
+                    match acc.addr {
+                        Some(a) => assert_eq!(a, addr),
+                        None => acc.addr = Some(addr.clone()),
+                    }
+                    match result.action {
+                        Action::NSLookup { key, inode: Some(inode) } => {
+                            match &acc.key {
+                                Some(k) => assert_eq!(*k, key),
+                                None => acc.key = Some(key.clone()),
+                            }
+                            match &acc.inode {
+                                Some(i) => assert_eq!(*i, inode),
+                                None => acc.inode = Some(inode.clone()),
+                            }
+                        },
+                        Action::INodeLookup { inode, block: Some((seq, block)) } => {
+                            match &acc.inode {
+                                Some(i) => assert_eq!(*i, inode),
+                                None => acc.inode = Some(inode.clone()),
+                            }
+                            assert_eq!(acc.seq_block.insert(seq, block.clone()), None);
+                        },
+                        Action::BlockLookup { block, node: Some(node) } => {
+                            let block_sn = acc.block_sn.entry(block.clone()).or_insert_with(Vec::new);
+                            block_sn.push(node.clone());
+                        },
+                        Action::HostLookup { node, addr: Some(addr) } => {
+                            assert_eq!(acc.locations.insert(node.clone(), addr.clone()), None);
+                        },
+                        // TODO: ensure we also consume the empty responses?
+                        _ => {},
+                    }
+                })
+            -> map(|(id, resp): (ClientID, InfoResponse)| Into::<(CKResponse, SocketAddr)>::into(resp))
+            -> respond;
+
+        respond = union() -> dest_sink_serde(cl_outbound);
 
         // segnode
         segnode_demux = source_stream_serde(sn_inbound)
@@ -367,7 +466,7 @@ async fn segment_node(opts: &Opts, keynode_server_addr: &'static str, sn_uuid: U
     let cl_sn_addr: SocketAddr = ipv4_resolve("127.0.0.1:0").unwrap(); // random service port
 
     let hb_interval_stream = IntervalStream::new(time::interval(time::Duration::from_secs(1)));
-    let (_cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(cl_sn_addr).await;
+    let (cl_outbound, _cl_inbound, cl_addr) = bind_tcp_bytes(cl_sn_addr).await;
 
     println!("{}: SN: Starting {sn_id:?}@{cl_addr:?} with {init_blocks:?}", Utc::now());
     let mut df = hydroflow_syntax! {

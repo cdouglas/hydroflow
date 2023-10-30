@@ -34,7 +34,7 @@ pub(crate) async fn run_client(ck_addr: SocketAddr, opts: Opts) {
             -> for_each(|b: LocatedBlock| println!("{}:      {:?} {:?}", Utc::now(), b.block.id, b.locations));
 
         kn_inbound[create]
-            -> for_each(|(kl, a): (KeyLease, SocketAddr)| println!("{}: {:?} CREATE {:?}", Utc::now(), a, kl));
+            -> for_each(|(kl, a): (Result<KeyLease, CKError>, SocketAddr)| println!("{}: {:?} CREATE {:?}", Utc::now(), a, kl));
 
         kn_inbound[errs]
             -> for_each(|(m, a): (CKResponse, SocketAddr)| println!("{}: {:?} ERR {:?}", Utc::now(), a, m));

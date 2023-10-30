@@ -19,17 +19,13 @@ pub struct BlockLease {
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
-pub struct BlockState {
-}
-
-#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
-#[rustfmt::skip]
 pub struct Heartbeat {
     pub id: SegmentNodeID,
     pub addr: SocketAddr,
 }
 
-#[derive(Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
+// XXX Ord should be unnecessary, but it's used for sorting the map of seq -> block
+#[derive(Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct Block {
     pub pool: String, // cluster ID
@@ -87,20 +83,36 @@ pub struct CKRequest {
 #[derive(PartialEq, Eq, Hash, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 pub enum CKRequestType { // TODO client requests should include seq
-    Create   { key: String },
-    AddBlock { lease: KeyLease },
-    Open     { key: String },
-    Info     { key: String },
-    Close    { lease: KeyLease, blocks: Vec<Block> }, // flag to block?
+    Create     { key: String },
+    Open       { key: String },
+    Info       { key: String },
+    AddBlock   { lease: KeyLease },
+    CloseBlock { lease: BlockLease }, // flag to block?
+    Close      { lease: KeyLease, blocks: Vec<Block> }, // flag to block?
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
+pub struct CKError {
+    pub description: String,
+    pub error: CKErrorKind,
+}
+
+#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[rustfmt::skip]
+pub enum CKErrorKind {
+    AlreadyExists,
+    NotFound,
+}
+
+// TODO: put some thought into Result<CKResponse, CKError> vs CKResponse::Type w/ CKError embedded
+#[derive(PartialEq, Clone, Serialize, Deserialize, Debug)]
+#[rustfmt::skip]
 pub enum CKResponse {
-    Create   { klease: KeyLease },
-    AddBlock { blease: BlockLease },
-    Open     { blocks: Vec<Block> },
-    Info     { key: String, blocks: Vec<LocatedBlock> }, // break into multiple responses, to avoid blocking merge?
+    Create   { klease: Result<KeyLease, CKError> },
+    AddBlock { blease: Result<BlockLease, CKError> },
+    Open     { blocks: Result<Vec<Block>, CKError> },
+    Info     { key: String, blocks: Vec<LocatedBlock> }, // multiple responses, include nonce/inode for open
     Close    { },
 }
 
