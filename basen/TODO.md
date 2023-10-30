@@ -1,6 +1,71 @@
-# 2023-10-27
+# 2023-10-30
 
-Working with hydroflow is the least fun I've ever had programming.
+
+
+# 2023-10-29
+
+## Not now.
+
+Should clientIDs be visible, so users can use partitioned namespaces? Rather
+than assuming that each client ID corresponds to a process that emits a sequence
+of requests, can we distribute the namespace across endpoints? This would admit
+the possibility of partitioning a program without losing sequentiality, at least
+beyond its spec.  Messages arriving from different endpoints in the same
+namespace could declare points of order/coordination by advancing the epoch?
+
+Definitely reinvinting the wheel here, but I'm not sure what the wheel is.
+
+## Better design? At least it doesn't feel like throwaway
+
+OK. Let's just safe all pending requests to a relation, join later.  we could
+also join after each step, yielding a subsequent step.  this looks a lot like
+_eddies_, creating an address bus and... we're combining the stage lattices of
+evita raced with priority queue from eddies.
+
+Don't have time to do this, but write it down, anwyay.
+
+Start w/ union of prev (w/ state machine) and next (w/ init state machine).
+
+Blindly generate new actions from each state machine. If it's a CKResponse, queue
+it and check for conflicts. If it's empty, then queue it for the next tick.
+
+Actions are routed to modules (NSLookup, INodeLookup, etc.). Dependencies are
+handled within the SM.
+
+As internal responses to actions accumulate, route them to the originating SM.
+
+## Current notes
+
+req_merge: union of all the exhaust produced by queries
+- join with requests
+- demux and resolve to responses
+
+
+### Repeating pattern?
+
+req_(mapping) = union() -> tee()
+req_(mapping)[0] -> map(PartialResult) -> req_merge; // empty result
+req_(mapping)[1] -> LHS of equijoin;                 // resolve: non-empty result
+
+(mapping) -> map(id, (payload)) -> [0]resp_(mapping);
+tick_reqs[k] -> [1]resp_(mapping);
+
+resp_(mapping) = join() // (id, ((payload), (req, _)))
+  -> tee();
+
+resp_(mapping)[0]
+  -> map(PartialResult) -> req_merge // non-empty result
+
+resp_(mapping)[1]
+  -> demux(req.type)
+
+resp_(mapping)[create]
+  -> req_(mapping2)
+
+This retains the 1:1 id: access mapping, but if multiple clients make the same request, we don't need to repeat them...
+Leave as-is for now, but explore whether the empty result can be joined with the query across all requests
+- query could differ by type... possible for read-only queries to share, conflicts to be detected within the pipeline?
+
 
 # 2023-10-23
 

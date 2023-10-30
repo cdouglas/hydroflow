@@ -31,15 +31,23 @@ pub enum GraphType {
     Dot,
 }
 
+#[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct PartialResult {
+    reqid: ClientID,
+    //seq: u64,
     action: Action,
 }
 
+#[derive(Eq, Hash, PartialEq, Clone, Debug)]
 enum Action {
-    NSLookup    { req: CKRequest, key: String, inode: Option<INode> },
-    INodeLookup { req: CKRequest, inode: INode, block: Option<Vec<Block>>, lease: Option<KeyLease> },
-    BlockLookup { req: CKRequest, block: Block, node: Option<Vec<SegmentNodeID>>, lease: Option<BlockLease> },
-    HostLookup  { req: CKRequest, node: SegmentNodeID, addr: Option<Vec<SocketAddr>> },
+    NSLookup    { key: String, inode: Option<INode>, },
+    // Avoiding nesting...
+    //INodeLookup { inode: INode,        block: Option<Vec<Block>>,        lease: Option<KeyLease> },
+    //BlockLookup { block: Block,        node: Option<Vec<SegmentNodeID>>, lease: Option<BlockLease> },
+    //HostLookup  { node: SegmentNodeID, addr: Option<Vec<SocketAddr>> },
+    INodeLookup { inode: INode, block: Option<(usize, Block)>, }, // , lease: Option<KeyLease> },
+    BlockLookup { block: Block, node: Option<SegmentNodeID>, }, //lease: Option<BlockLease> },
+    HostLookup  { node: SegmentNodeID, addr: Option<SocketAddr> },
 }
 
 #[derive(Parser, Debug)]
@@ -122,21 +130,28 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         disk_key_inode = log[0]   // (key, inode)
             -> map(|(key, inode, _): (String, INode, Vec<Block>)| (key, inode))
             -> unique() // necessary?
-            -> [1]key_map;
+            -> [1]key_inode;
 
         disk_inode_block = log[1] // (inode, seq, block)
             // store as (inode, seq, block) to preserve order
             -> flat_map(|(_, inode, blocks)| blocks.into_iter().enumerate().map(move |(i, block)| (inode.clone(), (i, block))))
-            -> [1]inode_map;
+            -> [1]inode_block;
+
+        new_reqs = source_stream_serde(cl_inbound)
+            -> map(Result::unwrap)
+            -> tee();
+        // merge all incoming requests from this tick (TODO: should be able to defer reqs to next tick)
+        tick_reqs = new_reqs[0] // TODO idx still necessary?
+            -> map(|(cl_req, addr): (CKRequest, SocketAddr)| (cl_req.id.clone(), (cl_req, addr)))
+            -> tee();
 
         // client
-        client_demux = source_stream_serde(cl_inbound)
-            -> map(Result::unwrap)
-            -> inspect(|(m, a)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
+        client_demux = new_reqs[1]
+            -> inspect(|(m, a): &(CKRequest, SocketAddr)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr): (CKRequest, SocketAddr), var_args!(create, info, errs)|
                     match &cl_req.payload {
-                        CKRequestType::Info { key, .. } => info.give((key.clone(), (cl_req, addr))),
-                        CKRequestType::Create { key, .. } => create.give((key.clone(), (cl_req, addr))),
+                        CKRequestType::Info { key, .. } => info.give((key.clone(), cl_req.id.clone())),
+                        CKRequestType::Create { key, .. } => create.give((key.clone(), cl_req.id.clone())),
                         _ => errs.give((cl_req, addr)),
                     }
                 );
@@ -145,176 +160,191 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
         // CREATE: client_demux
         create_key_inode = client_demux[create]
-            -> inspect(|(_key, (req, addr)): &(String, (CKRequest, SocketAddr))| println!("{}: KN: CREATE {:?} from {:?}", Utc::now(), req, addr))
-            -> tee();
-        create_key_inode[0]
-            -> req_key_map;
-        create_key_inode[1]
-            -> map(|(_key, (req, _addr))| ((req, 1u8), None)) // record missing key->inode?
-            -> req_merge;
+            -> inspect(|(key, id): &(String, ClientID)| println!("{}: KN: {:?} CREATE {:?}", Utc::now(), id, key))
+            -> req_key_inode;
 
         // INFO: client_demux
         info_key_inode = client_demux[info]
-            -> inspect(|(_key, (req, addr))| println!("{}: KN: INFO {:?} from {:?}", Utc::now(), req, addr))
-            -> tee();
-        info_key_inode[0]
-            -> req_key_map;
-        info_key_inode[1]
-            -> map(|(_key, (req, _addr))| ((req, 1u8), None)) //(EMPTY_KEY, addr)))
-            -> req_merge;
+            -> inspect(|(key, id): &(String, ClientID)| println!("{}: KN: {:?} INFO {:?}", Utc::now(), id, key))
+            -> req_key_inode;
 
         // LHS of join with key->inode map
-        req_key_map = union()
-            -> [0]key_map;
-
-        // merge all Actions produced as exhaust
-        req_merge = union()
-            //-> fold_keyed(|| vec![], |old: &mut Vec<_>, new: ((CKRequest, u8), _)| old.push(new))
-            -> inspect(|((req, fragment), _placeholder): &((CKRequest, u8), Option<String>) | println!("REQ_MERGE: {:?} {:?}", req, fragment))
-            //-> fold_keyed(|| vec![], |old: &mut Vec<_>, new: ((CKRequest, u8), Option<String>)| {
-            //    match new {
-            //        ((CKRequest::Create { .. }, _), Some(key)) => old.push(Action::NSLookup { key, inode: None }),
-            //        ((CKRequest::Info { .. }, _), Some(key)) => old.push(Action::NSLookup { key, inode: None }),
-            //        _ => (),
-            //    
-            //    })
-            -> null();
+        // (key, reqid): String, ClientID
+        req_key_inode = union() -> tee();
+        req_key_inode[0] // record EMPTY result
+            -> map(|(key, id): (String, ClientID)| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: None } })
+            -> req_merge;
+        req_key_inode[1] // attempt join
+            -> [0]key_inode;
 
         // join requests LHS:(key, req) with existing key map RHS:(key, inode)
-        key_map = join::<'tick, 'static>()
-            -> demux(|(_key, ((req, addr), inode)) : (String, ((CKRequest, SocketAddr), INode)), var_args!(create, info)| //, errs)|
+        key_inode = join::<'tick, 'static>()
+            -> inspect(|(key, (id, inode)) : &(String, (ClientID, INode))| println!("{}: KN: KEY {:?} found existing inode {:?}", Utc::now(), key, inode))
+            -> map(|(key, (id, inode))| (id, (key, inode)))
+            -> [0]resp_key_inode;
+        tick_reqs
+            -> [1]resp_key_inode;
+        resp_key_inode = join::<'tick, 'tick>()
+            -> tee();
+        resp_key_inode[0]
+            -> map(|(id, ((key, inode), (req, _)))| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: Some(inode.clone()) } })
+            -> req_merge;
+
+        key_inode_result = resp_key_inode[1]
+            -> demux(|(id, ((key, inode), (req, _))) : (ClientID, ((String, INode), (CKRequest, SocketAddr))), var_args!(create, info)|
                     match &req.payload {
-                        CKRequestType::Create {   .. } => create.give((inode, (req, addr))),
-                        CKRequestType::Info {   .. } => info.give((inode, (req, addr))),
+                        CKRequestType::Create {   .. } => create.give((inode, id)),
+                        CKRequestType::Info {   .. } => info.give((inode, id)),
+                        _ => panic!(),
+                    }
+                );
+        key_inode_result[create]
+            -> inspect(|(inode, req)| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
+            -> null(); // TODO: overwrite flag; for now, this is sufficient to construct an error in req_merge
+
+        key_inode_result[info]
+            -> req_inode_block;
+        
+        req_inode_block = union() -> tee();
+        req_inode_block[0] // EMPTY result
+            -> map(|(inode, id): (INode, ClientID)| PartialResult { reqid: id, action: Action::INodeLookup { inode: inode.clone(), block: None, } })
+            -> req_merge;
+        req_inode_block[1] // attempt join
+            -> [0]inode_block;
+
+        inode_block = join::<'tick, 'static>()
+            -> inspect(|(inode, (id, (seq, block))): &(INode, (ClientID, (usize, Block)))| println!("{}: KN: INODE {:?} found existing {:?} block {:?}", Utc::now(), inode, seq, block))
+            -> map(|(inode, (id, (seq, block)))| (id, (inode, seq, block)))
+            -> [0]resp_inode_block;
+        tick_reqs
+            -> [1]resp_inode_block;
+        resp_inode_block = join::<'tick, 'tick>() -> tee();
+        resp_inode_block[0]
+            -> map(|(id, ((inode, seq, block), (req, _)))| PartialResult { reqid: id, action: Action::INodeLookup { inode: inode.clone(), block: Some((seq, block.clone())), } })
+            -> req_merge;
+        inode_block_result = resp_inode_block[1]
+            -> demux(|(id, ((inode, _seq, block), (req, _))): (ClientID, ((INode, usize, Block), (CKRequest, _))), var_args!(info, errs)|
+                    match &req.payload {
+                        //CKRequestType::Create {  key, .. } => create.give((block, (seq, inode, key.clone(), req, addr))), // Create doesn't reach here
+                        CKRequestType::Info { key, .. } => info.give((block, id)),
+                        _ => errs.give(id),
+                    }
+                );
+        inode_block_result[info]
+            -> req_block_host;
+        inode_block_result[errs] // demux must have at least 2 outputs
+            -> null();
+
+        req_block_host = union() -> tee();
+        req_block_host[0] // EMPTY result
+            -> map(|(block, id): (Block, ClientID)| PartialResult { reqid: id.clone(), action: Action::BlockLookup { block: block.clone(), node: None, } })
+            -> req_merge;
+        req_block_host[1] // attempt join
+            -> [0]block_host;
+
+        block_host = join::<'tick, 'static>()
+            -> inspect(|(block, (id, sn_id)): &(Block, (ClientID, SegmentNodeID))| println!("{}: KN: BLOCK {:?} found existing host {:?}", Utc::now(), block, sn_id))
+            -> map(|(block, (id, sn_id))| (id, (block, sn_id)))
+            -> [0]resp_block_host;
+        tick_reqs
+            -> [1]resp_block_host;
+        resp_block_host = join::<'tick, 'tick>() -> tee();
+        resp_block_host[0]
+            -> map(|(id, ((block, sn_id), (req, _)))| PartialResult { reqid: id, action: Action::BlockLookup { block: block.clone(), node: Some(sn_id.clone()), } })
+            -> req_merge;
+        block_host_result = resp_block_host[1]
+            -> demux(|(id, ((block, sn_id), (req, _))): (ClientID, ((Block, SegmentNodeID), (CKRequest, SocketAddr))), var_args!(info, errs)|
+                    match &req.payload {
+                        CKRequestType::Info { key, .. } => info.give((sn_id, id)),
+                        _ => errs.give(id),
+                    }
+                );
+        block_host_result[info]
+            -> req_host_live;
+        block_host_result[errs] // demux must have at least 2 outputs
+            -> null();
+
+        req_host_live = union() -> tee();
+        req_host_live[0] // EMPTY
+            -> map(|(sn_id, id): (SegmentNodeID, ClientID)| PartialResult { reqid: id.clone(), action: Action::HostLookup { node: sn_id.clone(), addr: None, } })
+            -> req_merge;
+        req_host_live[1]
+            -> [0]host_live;
+        host_live = join::<'tick, 'static>()
+            -> inspect(|(sn_id, (id, (svc_addr, last_contact))): &(SegmentNodeID, (ClientID, (SocketAddr, DateTime<Utc>)))| println!("{}: KN: HOST {:?} found existing {:?}", Utc::now(), sn_id, svc_addr))
+            -> filter(|(_, (_, (_, last_contact)))| Utc::now() - last_contact < chrono::Duration::seconds(10))
+            -> map(|(sn_id, (id, (svc_addr, last_contact)))| (id, (sn_id, svc_addr, last_contact)))
+            -> [0]resp_host_live;
+        tick_reqs
+            -> [1]resp_host_live;
+        resp_host_live = join::<'tick, 'tick>() -> tee();
+        resp_host_live[0]
+            -> map(|(id, ((sn_id, svc_addr, last_contact), (req, _)))| PartialResult { reqid: id, action: Action::HostLookup { node: sn_id.clone(), addr: Some(svc_addr.clone()), } })
+            -> req_merge;
+        host_live_result = resp_host_live[1]
+            -> demux(|(id, ((sn_id, svc_addr, last_contact), (req, _))): (ClientID, ((SegmentNodeID, SocketAddr, DateTime<Utc>), (CKRequest, SocketAddr))), var_args!(info, errs)|
+                    match &req.payload {
+                        CKRequestType::Info { key, .. } => info.give((sn_id, id)),
+                        _ => errs.give(id),
+                    }
+                );
+        host_live_result[info]
+            -> null();
+        host_live_result[errs] // demux must have at least 2 outputs
+            -> null();
+
+
+        // XXX assuming ClientID is unique, so we can use it as a key
+        req_merge = union()
+            -> inspect(|fragment: &PartialResult | println!("REQ_MERGE: {:?} {:?}", fragment.reqid, fragment))
+            -> map(|fragment| (fragment.reqid.clone(), fragment))
+            -> [1]resolve;
+        tick_reqs
+            -> [0]resolve;
+        resolve = join::<'tick, 'tick>()
+            -> demux(|(id, ((req, addr), result)) : (ClientID, ((CKRequest, SocketAddr), PartialResult)), var_args!(create, info)|
+                    match &req.payload {
+                        CKRequestType::Create { key, .. } => create.give((id, key.clone(), result, addr)),
+                        CKRequestType::Info { key, .. } => info.give((id, key.clone(), result, addr)),
                         _ => panic!(),
                     }
                 );
 
-        create_inode_block = key_map[create]
-            -> inspect(|(inode, (req, _addr))| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
-            // TODO: err
+        // merge all Actions produced as exhaust
+        // TODO: need an internal ID for each request, so we can merge on that
+        resolve[create]
+            -> inspect(|(id, key, result, addr)| println!("{}: KN: CREATE {:?} RESOLVE({:?})", Utc::now(), key, result))
             -> null();
 
-        info_inode_block = key_map[info]
-            -> inspect(|(inode, (req, _addr))| println!("{}: KN: INFO {:?} found existing inode {:?}", Utc::now(), req, inode))
-            -> tee();
-        info_inode_block[0]
-            -> [0]inode_map;
-        info_inode_block[1]
-            -> map(|(_inode, (req, _addr))| ((req, 2u8), None)) // record missing key->inode?
-            -> req_merge;
-
-        inode_map = join::<'tick, 'static>()
-            -> demux(|(inode, ((req, addr), (seq, block))): (INode, ((CKRequest, SocketAddr), (usize, Block))), var_args!(create, info)| //, errs)|
-                    match &req.payload {
-                        CKRequestType::Create {  key, .. } => create.give((block, (seq, inode, key.clone(), req, addr))),
-                        CKRequestType::Info { key, .. } => info.give((block, (seq, inode, key.clone(), req.id.clone(), req, addr))),
-                        _ => panic!(), //errs.give(req),
-                    }
-                );
-
-        inode_map[create]
-            // should be an error for create to be routed here
-            -> inspect(|(block, (seq, inode, key, req, addr))| println!("WTF0: {:?} {:?} {:?} {:?} {:?} {:?}", block, seq, inode, key, req, addr))
+        resolve[info]
+            -> inspect(|(id, key, result, addr)| println!("{}: KN: INFO {:?} RESOLVE({:?})", Utc::now(), key, result))
             -> null();
-
-        info_block_host = inode_map[info]
-            -> tee();
-        info_block_host[0]
-            // COMPAT w/ old lattice stuff
-            -> inspect(|(block, (seq, inode, key, id, req, addr))| println!("DEBUG0: {:?} {:?} {:?} {:?} {:?} {:?} {:?}", block, seq, inode, key, id, req, addr))
-            -> map(|(block, (_seq, _inode, key, id, _req, addr)): (Block, (usize, INode, String, ClientID, CKRequest, SocketAddr))| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([(id, addr)]))])))
-            //-> flat_map(|(key, (cli, blocks))| blocks.into_iter().map(move
-            //    |block| (block, MapUnionHashMap::new_from([(key.clone(), SetUnionHashSet::new_from([cli.clone()]))]))))
-            -> [0]block_map;
-        info_block_host[1]
-            -> map(|(_block, (_seq, _inode, _key, _id, req, _addr))| ((req, 3u8), None)) // record missing inode->block?
-            -> req_merge;
 
         // segnode
         segnode_demux = source_stream_serde(sn_inbound)
             -> map(|m| m.unwrap())
-            //-> inspect(|(m, a)| { println!("{}: KN: SN {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(sn_req, addr), var_args!(heartbeat, errs)|
                     match sn_req {
                         //SKRequest::Register {id, ..}    => register.give((key, addr)),
-                        SKRequest::Heartbeat { id, svc_addr, blocks, } => heartbeat.give((id, svc_addr, blocks, addr, Max::new(Utc::now()))),
+                        SKRequest::Heartbeat { id, svc_addr, blocks, } => heartbeat.give((id, svc_addr, blocks, addr, Utc::now())),
                         //_ => errs.give((sn_req, addr)),
                         _ => errs.give((sn_req, addr)),
                     }
                 );
 
-        heartbeats = segnode_demux[heartbeat]
-            -> tee();
-        segnode_demux[errs]
-          -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
+        heartbeats = segnode_demux[heartbeat] -> tee();
+        segnode_demux[errs] -> for_each(|(msg, addr)| println!("KN: Unexpected SN message type: {:?} from {:?}", msg, addr));
 
         // Heartbeat response
         heartbeats
             -> map(|(_, _, _, addr, _)| (SKResponse::Heartbeat { }, addr))
             -> dest_sink_serde(sn_outbound);
-
-        // XXX note equivalent t lattice_fold() -> join() on both sides, but this is more efficient
-        last_contact_map = _lattice_join_fused_join::<'tick, 'static,
-                MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
-                DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>>()
-            -> inspect(|x: &(SegmentNodeID,
-                (MapUnionHashMap<Block, MapUnionHashMap<String,SetUnionHashSet<(ClientID, SocketAddr)>>>,
-                 DomPair<Max<DateTime<Utc>>, Point<SocketAddr, ()>>))|
-                            println!("{}: <- LCM: {x:?}", Utc::now()))
-            // XXX want this filter to yield... a MIN/BOT value s.t. if no valid replicas, will merge into an error value?
-            // remove segment nodes that haven't sent a heartbeat in the last 10 seconds
-            -> filter(|(_, (_, hbts))| Utc::now() - *hbts.as_reveal_ref().0.as_reveal_ref() < chrono::Duration::seconds(10))
-            // extract the service address from those nodes
-            -> flat_map(|(_, (block_clikey, hbts))| block_clikey.into_reveal().into_iter().map(move
-                |(block, clikeys)| MapUnionHashMap::new_from([(block,
-                    Pair::<MapUnionHashMap<String,SetUnionHashSet<(ClientID,SocketAddr)>>, SetUnionHashSet<SocketAddr>>
-                        ::new_from(clikeys, SetUnionHashSet::new_from([hbts.into_reveal().1.val])))])))
-            //-> lattice_fold::<'tick,
-            //    MapUnionHashMap<Block,
-            //                    Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-            //                         SetUnionHashSet<SocketAddr>>>>()
-            -> lattice_fold::<'tick>(
-                MapUnionHashMap::<Block,
-                                Pair<MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-                                     SetUnionHashSet<SocketAddr>>>::default())
-            // unpack map into tuples
-            -> flat_map(|block_keycli_addr| block_keycli_addr.into_reveal().into_iter().map(move
-                |(block, req_sn_addrs)| (block, req_sn_addrs.into_reveal())))
-            -> flat_map(move |(block, (reqs, sn_addrs)): (Block, (MapUnionHashMap<String, SetUnionHashSet<(ClientID,SocketAddr)>>,
-                                                             SetUnionHashSet<SocketAddr>))|
-                    reqs.into_reveal().into_iter().map(move |(key, cliset)|
-                    (key,
-                    LocatedBlock {
-                        block: block.clone(),
-                        locations: sn_addrs.clone().into_reveal().into_iter().collect::<Vec<_>>(), // XXX clone() avoidable?
-                    },
-                    cliset)))
-            -> flat_map(move |(key, lblock, cliset)| cliset.into_reveal().into_iter().map(move |(id, addr)| ((id, addr, key.clone()), lblock.clone())))
-            -> fold_keyed::<'tick>(Vec::new, |lblocks: &mut Vec<LocatedBlock>, lblock| {
-                lblocks.push(lblock);
-            })
-            -> map(|((_, addr, key), lblocks)| (CKResponse::Info { key: key, blocks: lblocks }, addr))
-            -> inspect(|x| println!("{}: -> LCM: {x:?}", Utc::now()))
-            -> dest_sink_serde(cl_outbound);
-
-        heartbeats
-            -> map(|(id, svc_addr, _, _, last_contact)| (id, DomPair::<Max<DateTime<Utc>>,Point<SocketAddr, ()>>::new_from(last_contact, Point::new_from(svc_addr))))
-            //-> inspect(|x| println!("{}: KN: HB_LC: {x:?}", Utc::now()))
-            -> [1]last_contact_map;
-
-        // join all requests for blocks reported from segment nodes
-        block_map = _lattice_join_fused_join::<'tick, 'static, MapUnionHashMap<String, SetUnionHashSet<(ClientID, SocketAddr)>>, SetUnionHashSet<SegmentNodeID>>()
-            // can we replace `clone()` with `to_owned()`? The compiler thinks so!
-            -> flat_map(|(block, (clikeyset, sn_set))| sn_set.into_reveal().into_iter().map(move |sn|
-                    (sn, MapUnionHashMap::new_from([(block.clone(), clikeyset.clone())]))))
-            -> [0]last_contact_map;
-
-        heartbeats
-            -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, SocketAddr, Vec<Block>, _, Max<DateTime<Utc>>)| blocks.into_iter().map(move |block| (block, SetUnionHashSet::new_from([id.clone()]))))
-            -> [1]block_map;
-
-
+        heartbeats // (block, sn_id)
+            -> flat_map(|(id, _, blocks, _, _): (SegmentNodeID, _, Vec<Block>, _, _)| blocks.into_iter().map(move |block| (block, id.clone())))
+            -> [1]block_host;
+        heartbeats // (sn_id, (last_contact, svc_addr))
+            -> map(|(segid, svc_addr, _, _, last_contact)| (segid, (svc_addr, last_contact)))
+            -> [1]host_live;
     };
 
     //df.meta_graph().unwrap().write_mermaid(std::fs::File::create("lattice.md")).unwrap();
