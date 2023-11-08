@@ -1,6 +1,16 @@
 # 2023-10-30
 
+OK. You rewrote everything to use this weird pattern. What now?
 
+## Adding info/create
+
+OK. Got all the exhaust into one place.
+
+Now. This is calling out for a request ID and unique IDs for each stage/request, but you can IGNORE THAT and use the ClientID.
+
+Given the ClientID, try to merge all the PartialResults into a HashMap. Because why not, I guess.
+
+Start with INFO. 
 
 # 2023-10-29
 

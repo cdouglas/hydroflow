@@ -29,8 +29,8 @@ pub(crate) async fn run_client(ck_addr: SocketAddr, opts: Opts) {
             );
 
         kn_inbound[info]
-            -> inspect(|(k, _, _): &(String, Vec<LocatedBlock>, SocketAddr)| println!("{}: INFO {:?}", Utc::now(), k))
-            -> flat_map(|(_, b, _): (String, Vec<LocatedBlock>, SocketAddr)| b.into_iter().map(move |lb| lb))
+            -> inspect(|(k, _, _): &(Result<String,CKError>, Vec<LocatedBlock>, SocketAddr)| println!("{}: INFO {:?}", Utc::now(), k))
+            -> flat_map(|(_, b, _): (Result<String,CKError>, Vec<LocatedBlock>, SocketAddr)| b.into_iter().map(move |lb| lb))
             -> for_each(|b: LocatedBlock| println!("{}:      {:?} {:?}", Utc::now(), b.block.id, b.locations));
 
         kn_inbound[create]

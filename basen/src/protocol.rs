@@ -112,7 +112,7 @@ pub enum CKResponse {
     Create   { klease: Result<KeyLease, CKError> },
     AddBlock { blease: Result<BlockLease, CKError> },
     Open     { blocks: Result<Vec<Block>, CKError> },
-    Info     { key: String, blocks: Vec<LocatedBlock> }, // multiple responses, include nonce/inode for open
+    Info     { key: Result<String, CKError>, blocks: Vec<LocatedBlock> }, // multiple responses, include nonce/inode for open
     Close    { },
 }
 

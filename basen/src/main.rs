@@ -73,26 +73,35 @@ impl InfoResponse {
 
 impl Into<(CKResponse, SocketAddr)> for InfoResponse {
     fn into(self) -> (CKResponse, SocketAddr) {
-        let mut loc_blocks = vec![];
-        let mut seq_block = self.seq_block.iter().collect::<Vec<_>>();
-        seq_block.sort();
-        for (i, (seq, block)) in seq_block.into_iter().enumerate() {
-            assert_eq!(i, *seq); // TODO don't crash, return internal error
-            let mut locs = vec![];
-            if let Some(replicas) = self.block_sn.get(block) {
-                for replica in replicas {
-                    if let Some(locations) = self.locations.get(replica) {
-                        locs.push(locations.clone());
+        if let Some(inode) = &self.inode {
+            let mut loc_blocks = vec![];
+            let mut seq_block = self.seq_block.iter().collect::<Vec<_>>();
+            seq_block.sort();
+            for (i, (seq, block)) in seq_block.into_iter().enumerate() {
+                assert_eq!(i, *seq); // TODO don't crash, return internal error
+                let mut locs = vec![];
+                if let Some(replicas) = self.block_sn.get(block) {
+                    for replica in replicas {
+                        if let Some(locations) = self.locations.get(replica) {
+                            locs.push(locations.clone());
+                        }
                     }
                 }
+                loc_blocks.push(LocatedBlock { block: block.clone(), locations: locs });
             }
-            loc_blocks.push(LocatedBlock { block: block.clone(), locations: locs });
+            (CKResponse::Info {
+                key: Ok(self.key.unwrap()),
+                blocks: loc_blocks,
+            },
+            self.addr.unwrap())
+        } else {
+            println!("DEBUG0");
+            (CKResponse::Info {
+                key: Err(CKError { description: "not found".to_owned(), error: CKErrorKind::NotFound }),
+                blocks: vec![],
+            },
+            self.addr.unwrap())
         }
-        (CKResponse::Info {
-            key: self.key.unwrap(),
-            blocks: loc_blocks,
-        },
-        self.addr.unwrap())
     }
 }
 
@@ -171,8 +180,8 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
     let init_keys = init_keys.to_vec();
 
-    let mut req_seq = 0u64..;
-    let mut block_seq = 1u64 + init_keys.iter().fold(0u64, |acc, (_, _, blocks)| acc.max(blocks.len() as u64));
+    //let mut req_seq = 0u64..;
+    //let mut block_seq = 1u64 + init_keys.iter().fold(0u64, |acc, (_, _, blocks)| acc.max(blocks.len() as u64));
 
     let mut df = hydroflow_syntax! {
         // load initial keyset
@@ -251,7 +260,6 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         key_inode_result[create]
             -> inspect(|(inode, req)| println!("{}: KN: CREATE {:?} found existing inode {:?}", Utc::now(), req, inode))
             -> null(); // TODO: overwrite flag; for now, this is sufficient to construct an error in exhaust
-
         key_inode_result[info]
             -> req_inode_block;
         
@@ -394,6 +402,12 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
                             match &acc.inode {
                                 Some(i) => assert_eq!(*i, inode),
                                 None => acc.inode = Some(inode.clone()),
+                            }
+                        },
+                        Action::NSLookup { key, inode: None } => {
+                            match &acc.key {
+                                Some(k) => assert_eq!(*k, key),
+                                None => acc.key = Some(key.clone()),
                             }
                         },
                         Action::INodeLookup { inode, block: Some((seq, block)) } => {
