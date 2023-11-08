@@ -74,6 +74,7 @@ impl InfoResponse {
 impl Into<(CKResponse, SocketAddr)> for InfoResponse {
     fn into(self) -> (CKResponse, SocketAddr) {
         if let Some(inode) = &self.inode {
+            // file exists
             let mut loc_blocks = vec![];
             let mut seq_block = self.seq_block.iter().collect::<Vec<_>>();
             seq_block.sort();
@@ -95,7 +96,7 @@ impl Into<(CKResponse, SocketAddr)> for InfoResponse {
             },
             self.addr.unwrap())
         } else {
-            println!("DEBUG0");
+            // file does not exist
             (CKResponse::Info {
                 key: Err(CKError { description: "not found".to_owned(), error: CKErrorKind::NotFound }),
                 blocks: vec![],
@@ -183,16 +184,21 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
     //let mut req_seq = 0u64..;
     //let mut block_seq = 1u64 + init_keys.iter().fold(0u64, |acc, (_, _, blocks)| acc.max(blocks.len() as u64));
 
+
     let mut df = hydroflow_syntax! {
         // load initial keyset
         log = source_iter(init_keys)
             -> tee();
-        disk_key_inode = log[0]   // (key, inode)
+        disk_key_inode = log   // (key, inode)
             -> map(|(key, inode, _): (String, INode, Vec<Block>)| (key, inode))
             -> unique() // necessary?
-            -> [1]key_inode;
+            -> tee();
+        disk_key_inode -> [1]key_inode;
+        disk_key_inode
+            -> inspect(|(key, inode): &(String, INode)| println!("{}: DEBUG1: LOAD {:?} {:?}", Utc::now(), key, inode))
+            -> rhs; //[1]debug_key_inode;
 
-        disk_inode_block = log[1] // (inode, seq, block)
+        disk_inode_block = log // (inode, seq, block)
             // store as (inode, seq, block) to preserve order
             -> flat_map(|(_, inode, blocks)| blocks.into_iter().enumerate().map(move |(i, block)| (inode.clone(), (i, block))))
             -> [1]inode_block;
@@ -207,7 +213,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> tee();
 
         // client
-        client_demux = new_reqs[1]
+        client_demux = new_reqs
             -> inspect(|(m, a): &(CKRequest, SocketAddr)| { println!("{}: KN: CL {:?} from {:?}", Utc::now(), m, a); })
             -> demux(|(cl_req, addr): (CKRequest, SocketAddr), var_args!(create, info, errs)|
                     match &cl_req.payload {
@@ -231,11 +237,40 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
 
         // Key -> INode
         req_key_inode = union() -> tee();
-        req_key_inode[0] // record EMPTY result
+        req_key_inode // record EMPTY result
             -> map(|(key, id): (String, ClientID)| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: None } })
             -> exhaust;
-        req_key_inode[1] // attempt join
+        req_key_inode
+            -> lhs; //[0]debug_key_inode;
+        req_key_inode // attempt join
             -> [0]key_inode;
+
+        lhs = tee();
+        rhs = tee();
+
+        lhs -> [0]joined;
+        rhs -> [1]joined;
+
+        joined = join::<'tick,'static>()
+            -> map(|(k, (lhs, rhs))| (k, (lhs, Some(rhs))))
+            -> inspect(|(k, (lhs, rhs))| println!("{}: KN: HIT  {:?} {:?} {:?}", Utc::now(), k, lhs, rhs))
+            -> combined;
+
+        lhs
+            -> inspect(|(k, v)| println!("{}: DEBUG2 LHS {:?} {:?}", Utc::now(), k, v))
+            -> [pos]missed;
+        rhs
+            -> inspect(|(k, v)| println!("{}: DEBUG2 RHS {:?} {:?}", Utc::now(), k, v))
+            -> map(|(k, _v)| k) -> [neg]missed;
+
+        missed = anti_join::<'tick,'static>()
+            -> map(|(k, v)| (k, (v, None)))
+            -> inspect(|(k, (lhs, rhs))| println!("{}: KN: MISS {:?} {:?} {:?}", Utc::now(), k, lhs, rhs))
+            -> combined;
+
+        combined = union()
+            -> inspect(|(key, (id, inode)) : &(String, (ClientID, Option<INode>))| println!("{}: <{:?}> {:?}: {:?}", Utc::now(), id, key, inode))
+            -> null();
 
         key_inode = join::<'tick, 'static>()
             -> inspect(|(key, (_id, inode)) : &(String, (ClientID, INode))| println!("{}: KN: KEY {:?} found existing inode {:?}", Utc::now(), key, inode))
@@ -460,7 +495,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> [1]host_live;
     };
 
-    //df.meta_graph().unwrap().write_mermaid(std::fs::File::create("lattice.md")).unwrap();
+    //println!("{:?}", df.meta_graph().unwrap().to_mermaid());
     if let Some(graph) = &opts.graph {
         print_graph(&df, graph);
     }
