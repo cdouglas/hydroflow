@@ -196,7 +196,7 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
         disk_key_inode -> [1]key_inode;
         disk_key_inode
             -> inspect(|(key, inode): &(String, INode)| println!("{}: DEBUG1: LOAD {:?} {:?}", Utc::now(), key, inode))
-            -> rhs; //[1]debug_key_inode;
+            -> [1]debug_key_inode;
 
         disk_inode_block = log // (inode, seq, block)
             // store as (inode, seq, block) to preserve order
@@ -236,39 +236,27 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> req_key_inode;
 
         // Key -> INode
+        req_key_inode = import!("left_outer_join.hf")
+            -> map(|(key, (id, inode))| (id, (key, inode)))
+            -> [0]resp_key_inode;
+        tick_reqs
+            -> [1]resp_key_inode;
+        resp_key_inode = join::<'tick, 'tick>()
+            -> tee();
+        resp_key_inode[0]
+            -> map(|(id, ((key, inode), (_req, _)))| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: Some(inode.clone()) } })
+            -> exhaust;
+            
         req_key_inode = union() -> tee();
         req_key_inode // record EMPTY result
             -> map(|(key, id): (String, ClientID)| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: None } })
             -> exhaust;
         req_key_inode
-            -> lhs; //[0]debug_key_inode;
+            -> [0]debug_key_inode;
         req_key_inode // attempt join
             -> [0]key_inode;
 
-        lhs = tee();
-        rhs = tee();
-
-        lhs -> [0]joined;
-        rhs -> [1]joined;
-
-        joined = join::<'tick,'static>()
-            -> map(|(k, (lhs, rhs))| (k, (lhs, Some(rhs))))
-            -> inspect(|(k, (lhs, rhs))| println!("{}: KN: HIT  {:?} {:?} {:?}", Utc::now(), k, lhs, rhs))
-            -> combined;
-
-        lhs
-            -> inspect(|(k, v)| println!("{}: DEBUG2 LHS {:?} {:?}", Utc::now(), k, v))
-            -> [pos]missed;
-        rhs
-            -> inspect(|(k, v)| println!("{}: DEBUG2 RHS {:?} {:?}", Utc::now(), k, v))
-            -> map(|(k, _v)| k) -> [neg]missed;
-
-        missed = anti_join::<'tick,'static>()
-            -> map(|(k, v)| (k, (v, None)))
-            -> inspect(|(k, (lhs, rhs))| println!("{}: KN: MISS {:?} {:?} {:?}", Utc::now(), k, lhs, rhs))
-            -> combined;
-
-        combined = union()
+        debug_key_inode = import!("left_outer_join.hf")
             -> inspect(|(key, (id, inode)) : &(String, (ClientID, Option<INode>))| println!("{}: <{:?}> {:?}: {:?}", Utc::now(), id, key, inode))
             -> null();
 
@@ -280,11 +268,11 @@ async fn key_node(opts: &Opts, keynode_sn_addr: &'static str, keynode_client_add
             -> [1]resp_key_inode;
         resp_key_inode = join::<'tick, 'tick>()
             -> tee();
-        resp_key_inode[0]
+        resp_key_inode
             -> map(|(id, ((key, inode), (_req, _)))| PartialResult { reqid: id, action: Action::NSLookup { key: key.clone(), inode: Some(inode.clone()) } })
             -> exhaust;
 
-        key_inode_result = resp_key_inode[1]
+        key_inode_result = resp_key_inode
             -> demux(|(id, ((_key, inode), (req, _))) : (ClientID, ((String, INode), (CKRequest, SocketAddr))), var_args!(create, info)|
                     match &req.payload {
                         CKRequestType::Create {   .. } => create.give((inode, id)),
