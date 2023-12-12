@@ -102,15 +102,15 @@ pub const PERSIST: OperatorConstraints = OperatorConstraints {
                 let #ident = {
                     if context.is_first_run_this_tick() {
                         #vec_ident.extend(#input);
-                        // #vec_ident.iter().cloned()
-                        let len = #vec_ident.len();
-                        #vec_ident[len..].iter().cloned()
+                        #vec_ident.iter().cloned()
+                        //let len = #vec_ident.len();
+                        //#vec_ident[len..].iter().cloned()
                     } else {
-                        // let len = #vec_ident.len();
-                        #vec_ident.extend(#input);
-                        // #vec_ident[len..].iter().cloned()
                         let len = #vec_ident.len();
+                        #vec_ident.extend(#input);
                         #vec_ident[len..].iter().cloned()
+                        //let len = #vec_ident.len();
+                        //#vec_ident[len..].iter().cloned()
                     }
                 };
             }
