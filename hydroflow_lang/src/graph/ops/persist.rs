@@ -1,8 +1,8 @@
 use quote::quote_spanned;
 
 use super::{
-    FlowPropArgs, OperatorCategory, OperatorConstraints,
-    OperatorWriteOutput, WriteContextArgs, RANGE_0, RANGE_1,
+    FlowPropArgs, OperatorCategory, OperatorConstraints, OperatorWriteOutput, WriteContextArgs,
+    RANGE_0, RANGE_1,
 };
 use crate::diagnostic::{Diagnostic, Level};
 use crate::graph::{FlowProps, LatticeFlowType};
@@ -102,10 +102,14 @@ pub const PERSIST: OperatorConstraints = OperatorConstraints {
                 let #ident = {
                     if context.is_first_run_this_tick() {
                         #vec_ident.extend(#input);
-                        #vec_ident.iter().cloned()
-                    } else {
+                        // #vec_ident.iter().cloned()
                         let len = #vec_ident.len();
+                        #vec_ident[len..].iter().cloned()
+                    } else {
+                        // let len = #vec_ident.len();
                         #vec_ident.extend(#input);
+                        // #vec_ident[len..].iter().cloned()
+                        let len = #vec_ident.len();
                         #vec_ident[len..].iter().cloned()
                     }
                 };
